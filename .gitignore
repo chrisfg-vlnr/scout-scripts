@@ -1,0 +1,8 @@
+# Discord bot token — live credential, never commit
+discord-token.json
+
+# Weekly catalog snapshots — runtime data, regenerated each week, large. Not source.
+data/
+
+# Node modules
+node_modules/

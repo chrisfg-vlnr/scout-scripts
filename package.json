@@ -1,0 +1,13 @@
+{
+  "name": "scout-competitor-tracker",
+  "version": "1.0.0",
+  "description": "Scout Competitor Scaling Tracker — weekly Shopify bestseller rank tracking (full-catalog HTML rank + JSON catalog) → Google Sheet + Discord. Zero AI token cost. Standalone copy for the Scout agent, isolated from CFNCS/MFEO.",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "googleapis": "^144.0.0"
+  }
+}

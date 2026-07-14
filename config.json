@@ -1,0 +1,35 @@
+{
+  "sheetId": "1tdrGptnfwNwrsdZHVt_ASSSvNYgZkPu2dJENS8OTajo",
+  "discordChannelId": "1526532157802025030",
+  "weeksToKeep": 4,
+  "maxCompetitors": 15,
+  "addCooldownSeconds": 60,
+  "fetch": {
+    "minDelayMs": 1000,
+    "maxDelayMs": 2000,
+    "timeoutMs": 25000,
+    "maxRetries": 3,
+    "maxPagesSafety": 800,
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+  },
+  "spikeThreshold": 50,
+  "flatThreshold": 10,
+  "junkHandlePatterns": [
+    "shipping-protection",
+    "package-protection",
+    "route-insurance",
+    "order-protection",
+    "warranty",
+    "gift-card",
+    "-vip$",
+    "^vip-",
+    "tip-",
+    "donation"
+  ],
+  "competitors": [
+    {"name":"NouveauRiche","baseUrl":"https://nouveauriche-official.com","collection":"all","enabled":true},
+    {"name":"ByEmiliaRose","baseUrl":"https://byemiliarose.com","collection":"all","enabled":true},
+    {"name":"Feanatic","baseUrl":"https://feanatic.com","collection":"all","enabled":true}
+  ],
+  "lastAddAtMs": 1784032010193
+}
