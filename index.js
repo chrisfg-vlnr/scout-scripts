@@ -9,21 +9,10 @@
 //                  --no-sheet  --no-discord  --no-save  --no-prune
 
 import fs from 'node:fs/promises';
-import { google } from 'googleapis';
 import {
   loadConfig, slug, buildSnapshot, saveSnapshot, loadSnapshots, pruneSnapshots,
-  computeMetrics, ROOT,
+  computeMetrics, ROOT, getSheetsClient, writeCompetitorTab,
 } from './lib.js';
-
-const GOOGLE_SA_PATH = '/home/chris/scripts/google-service-account.json';
-
-const HEADER = [
-  'Product Name', 'Product Handle', 'Product URL', 'Product Type',
-  'Last Week Rank', 'This Week Rank', 'WoW Change', 'Status', 'Last Updated',
-  'Wk -3 Rank', 'Wk -2 Rank', 'Month Change', 'Streak', 'Avg Rank (4w)',
-  'Hot Streak', 'Spike', 'Consistent Top 10',
-];
-const NCOL = HEADER.length;
 
 // ─── args ──────────────────────────────────────────────────────────────────────
 
@@ -44,98 +33,6 @@ function parseArgs(argv) {
 
 function localDate(tz) {
   return new Intl.DateTimeFormat('sv', { timeZone: tz }).format(new Date());
-}
-
-// ─── Google Sheets ───────────────────────────────────────────────────────────
-
-async function getSheetsClient() {
-  const sa = JSON.parse(await fs.readFile(GOOGLE_SA_PATH, 'utf8'));
-  const auth = new google.auth.GoogleAuth({
-    credentials: sa,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-  });
-  return google.sheets({ version: 'v4', auth });
-}
-
-async function getOrCreateSheetId(sheets, sheetId, tabName) {
-  const meta = await sheets.spreadsheets.get({ spreadsheetId: sheetId });
-  const existing = meta.data.sheets.find(s => s.properties.title === tabName);
-  if (existing) return existing.properties.sheetId;
-  const res = await sheets.spreadsheets.batchUpdate({
-    spreadsheetId: sheetId,
-    requestBody: { requests: [{ addSheet: { properties: { title: tabName, gridProperties: { frozenRowCount: 1 } } } }] },
-  });
-  const created = res.data.replies[0].addSheet.properties;
-  console.log(`  Created tab "${tabName}" (sheetId ${created.sheetId})`);
-  return created.sheetId;
-}
-
-const rankCell  = v => (typeof v === 'number' && Number.isFinite(v)) ? v : '';
-const boolCell  = v => (v === null || v === undefined ? '' : (v ? 'TRUE' : 'FALSE'));
-
-function rowFromMetric(r, today) {
-  return [
-    r.title, r.handle, r.url, r.productType,
-    rankCell(r.lastRank), rankCell(r.thisRank), rankCell(r.wow), r.status, today,
-    rankCell(r.wk3Rank), rankCell(r.wk2Rank), rankCell(r.monthChange), rankCell(r.streak),
-    rankCell(r.avgRank), boolCell(r.hotStreak), boolCell(r.spike), boolCell(r.consistentTop10),
-  ];
-}
-
-function pad(row, n) {
-  const out = row.slice(0, n);
-  while (out.length < n) out.push('');
-  return out;
-}
-
-function wowSortKey(cellVal) {
-  const n = Number(String(cellVal ?? '').replace(/[^\d.\-]/g, ''));
-  return (String(cellVal ?? '').trim() === '' || Number.isNaN(n)) ? Infinity : n;
-}
-
-// Upsert by Product Handle, preserve historical rows (incl. older Removed), sort by WoW asc, frozen header.
-async function writeCompetitorTab(sheets, sheetId, tabName, rows, today) {
-  const tabSheetId = await getOrCreateSheetId(sheets, sheetId, tabName);
-
-  // existing rows (preserve history — never delete)
-  let existing = [];
-  try {
-    const res = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: `'${tabName}'!A2:Q` });
-    existing = res.data.values ?? [];
-  } catch { existing = []; }
-
-  const byHandle = new Map();
-  for (const raw of existing) {
-    const h = (raw[1] ?? '').toString().trim();
-    if (h) byHandle.set(h, pad(raw, NCOL));
-  }
-  // current computation overrides
-  for (const r of rows) byHandle.set(r.handle, rowFromMetric(r, today));
-
-  const finalRows = [...byHandle.values()].sort((a, b) => {
-    const aw = wowSortKey(a[6]), bw = wowSortKey(b[6]);
-    if (aw !== bw) return aw - bw;
-    const at = wowSortKey(a[5]), bt = wowSortKey(b[5]); // This Week Rank
-    return at - bt;
-  });
-
-  // clear then write (deterministic full rewrite incl. preserved history)
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId: sheetId,
-    requestBody: { requests: [
-      { updateCells: { range: { sheetId: tabSheetId }, fields: 'userEnteredValue' } },
-      { updateSheetProperties: { properties: { sheetId: tabSheetId, gridProperties: { frozenRowCount: 1 } }, fields: 'gridProperties.frozenRowCount' } },
-      { repeatCell: { range: { sheetId: tabSheetId, startRowIndex: 0, endRowIndex: 1 },
-        cell: { userEnteredFormat: { textFormat: { bold: true } } }, fields: 'userEnteredFormat.textFormat.bold' } },
-    ] },
-  });
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: sheetId,
-    range: `'${tabName}'!A1`,
-    valueInputOption: 'USER_ENTERED',
-    requestBody: { values: [HEADER, ...finalRows] },
-  });
-  console.log(`  Sheet "${tabName}": ${finalRows.length} rows written (${rows.length} from this run, ${finalRows.length - rows.length} preserved).`);
 }
 
 // ─── Discord ───────────────────────────────────────────────────────────────────

@@ -112,7 +112,39 @@ node competitors.js --disable "Name"                         # "remove" = disabl
 ```
 
 `--add` runs a **live tier-detection check** (JSON catalog page 1 + HTML best-selling page 1) and
-prints the tier — including a clear **BLOCKED (Tier 3)** warning — before adding.
+prints the tier — including a clear **BLOCKED (Tier 3)** warning — before adding. On success, it
+also captures a full baseline snapshot **and writes it straight to the Sheet tab** (Scout-specific
+fix, not in the CFNCS original — see "Sheet sync on add" below), so the tab exists with real data
+from the moment the competitor is added rather than waiting for the next weekly run.
+
+### Sheet sync on add (Scout-specific fix — not in the CFNCS original)
+
+`competitors.js --add` used to only save the baseline snapshot to local disk
+(`data/<slug>-<date>.json`) — the Google Sheet tab wasn't created/populated until the *next*
+successful `index.js` run. Normally invisible, but it produced a real, confusing bug once: a
+competitor was added, its baseline saved locally (good data), then the very next `index.js` run
+(triggered manually for testing, same day) came back rate-limited/blocked — so the Sheet's
+first-ever write for that competitor was *only* the blocked marker, while `query.js` (which reads
+local snapshots) kept reporting the good baseline. Scout answered a direct challenge about this
+by trusting `query.js`'s local data and asserting the competitor definitely wasn't blocked —
+which was wrong for what was actually visible in the Sheet at that moment.
+
+Fixed by moving the Sheet-writing logic (`getSheetsClient`, `writeCompetitorTab`) into `lib.js` so
+both `index.js` and `competitors.js` can use it. `--add` now writes the baseline to the Sheet
+immediately (non-fatal if it fails — local snapshot is already safely saved either way, and it'll
+sync on the next successful weekly run instead).
+
+**Residual limitation, not fixed:** this closes the gap for a *newly-added* competitor. It does
+NOT add tracking of "was the most recent attempt blocked" for an *already-established* competitor
+on a later run — a blocked run is still never saved locally by design (so it can't clobber good
+history), so `query.js`/`competitors.js --list` still can't distinguish "last successful snapshot"
+from "the literal most recent attempt" for competitors added before this fix, or on any
+subsequent blocked run. `competitors.js --list`'s field is labeled `last successful snapshot:`
+(not `last run:`) specifically so it doesn't overclaim what it actually knows. Scout's `AGENTS.md`
+has a matching instruction: don't assert a competitor "isn't blocked" from `query.js` alone if
+someone pushes back — state what's actually known (the last successful snapshot) rather than
+implying it reflects the most recent attempt. Ground truth for "was the most recent run blocked"
+is the Sheet's `__blocked__` marker row's `Last Updated` date, if present.
 
 ### Abuse guard (Scout-specific — not in the CFNCS original)
 

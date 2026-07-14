@@ -18,7 +18,8 @@
 
 import {
   loadConfig, saveConfig, slug, findCompetitor, normalizeBaseUrl,
-  detectTier, loadSnapshots, buildSnapshot, saveSnapshot,
+  detectTier, loadSnapshots, buildSnapshot, saveSnapshot, computeMetrics,
+  getSheetsClient, writeCompetitorTab,
 } from './lib.js';
 
 function localDate(tz) {
@@ -46,7 +47,14 @@ function tierLabel(d) {
   return `✅ ${d.tier}  — ${bits.join(' | ')}`;
 }
 
-async function lastKnown(name) {
+async function lastKnownSnapshot(name) {
+  // NOTE: this is the last snapshot that was successfully SAVED, not necessarily the
+  // outcome of the most recent run attempt — a blocked run is deliberately never saved
+  // (so it can't clobber good history), so it won't show up here at all. If the most
+  // recent weekly run came back blocked, this will still show the last good week before
+  // that, with no indication a more recent attempt failed. Don't answer "was the last
+  // run blocked?" from this field alone — check the Sheet tab's __blocked__ marker row
+  // (Last Updated column) for the true most-recent-attempt status.
   const snaps = await loadSnapshots(name);
   if (snaps.length === 0) return '(no snapshot yet)';
   const s = snaps[0];
@@ -59,7 +67,7 @@ async function doList() {
   for (const c of cfg.competitors) {
     const status = c.enabled ? 'ENABLED ' : 'disabled';
     console.log(`  [${status}] ${c.name}  ${c.baseUrl}`);
-    console.log(`            last run: ${await lastKnown(c.name)}`);
+    console.log(`            last successful snapshot: ${await lastKnownSnapshot(c.name)}`);
   }
 }
 
@@ -121,6 +129,20 @@ async function doAdd(name, url, collection) {
   }
   await saveSnapshot(snapshot, entry);
   console.log(`✔ Baseline snapshot saved (${date}): ${snapshot.tier}, catalog ${snapshot.catalogCount}, ranked ${snapshot.rankedCount}, coverage ${Math.round(snapshot.coverage * 100)}%. WoW change will be available on the next weekly run.`);
+
+  // Write the baseline straight to the Sheet too — not just local disk. Without this, the
+  // Sheet tab doesn't exist until the next successful weekly index.js run, which can make
+  // Scout's own query.js answers (reads local snapshots) look inconsistent with what's
+  // actually visible in the Sheet if that next run happens to come back blocked before this
+  // baseline ever synced. Non-fatal: local baseline is already safely saved above regardless.
+  try {
+    const sheets = await getSheetsClient();
+    const { rows } = computeMetrics([snapshot], cfg);
+    await writeCompetitorTab(sheets, cfg.sheetId, entry.name, rows, date);
+    console.log(`✔ Baseline written to Sheet tab "${entry.name}" (${rows.length} rows) — in sync from the moment it's added.`);
+  } catch (e) {
+    console.log(`⚠️  Baseline captured locally but Sheet write failed (${e.message}). It'll sync on the next successful weekly run instead.`);
+  }
 }
 
 async function setEnabled(name, enabled) {
