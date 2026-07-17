@@ -82,6 +82,11 @@ function buildCompetitorReport(summary, prettyDate) {
   if (summary.blocked) {
     return `⚠️ **${name}** — BLOCKED this week (${summary.tier}). No data. Manual check recommended.`;
   }
+  if (summary.partial) {
+    return `⚠️ **${name}** — PARTIAL this week (${summary.tier}). ${summary.rankedCount ?? 0} ranked / `
+      + `${summary.catalogCount ?? 0} catalog before an early stop${summary.error ? ` — ${summary.error}` : ''}. `
+      + `Not saved as this week's baseline. Manual check recommended.`;
+  }
   const L = [];
   L.push(`📊 **${name} — WEEKLY RANK CHANGES**`);
   L.push(`Week of ${prettyDate} | ${summary.rankedCount} ranked / ${summary.catalogCount} catalog`);
@@ -141,31 +146,30 @@ async function main() {
       const snapshot = await buildSnapshot(comp, cfg, date);
       console.log(`  ${snapshot.tier} | catalog ${snapshot.catalogCount} | ranked ${snapshot.rankedCount} | coverage ${(snapshot.coverage * 100).toFixed(0)}%${snapshot.error ? ' | ' + snapshot.error : ''}`);
 
-      // Never persist a blocked snapshot — an empty catalog would mislabel the whole
-      // catalog as "New This Week" the week the store recovers. Comparison should always
-      // baseline against the last SUCCESSFUL week.
-      if (!args.noSave && !snapshot.blocked) { await saveSnapshot(snapshot, comp); }
+      // Never persist a blocked OR partial snapshot as this week's baseline. A blocked (empty)
+      // catalog would mislabel next week's whole catalog as "New This Week"; a partial one (a
+      // mid-crawl wall stopped the rank scrape or catalog fetch early) would just as wrongly
+      // mislabel every not-yet-reached product as "Removed From Store" the moment a future run
+      // reaches further. Comparison should always baseline against the last COMPLETE week.
+      const incomplete = snapshot.blocked || snapshot.partial;
+      if (!args.noSave && !incomplete) { await saveSnapshot(snapshot, comp); }
       if (!args.noSave && !args.noPrune) {
         const pruned = await pruneSnapshots(comp.name, cfg.weeksToKeep);
         if (pruned.length) console.log(`  Pruned ${pruned.length} old snapshot(s).`);
       }
 
-      // Use the freshly-built snapshot as "this week" + prior weeks from disk (dedup same date).
-      // Robust whether or not we saved, and avoids a disk round-trip.
-      const prior = (await loadSnapshots(comp.name)).filter(s => s.date !== snapshot.date);
-      const snaps = [snapshot, ...prior].slice(0, cfg.weeksToKeep);
-      const { rows, summary: sm } = computeMetrics(snaps, cfg);
-      summary = sm;
-      summary.blocked = snapshot.blocked;
-      summary.tier = snapshot.tier;
-
-      if (snapshot.blocked) {
-        // Mark the block visibly in the Sheet too.
-        // Preserves any existing product rows from prior good weeks; upserts one marker row
-        // keyed on the stable handle "__blocked__".
-        console.log(`  BLOCKED — flagged in report${sheets ? ' + Sheet marker' : ''} (snapshot not saved).`);
+      if (incomplete) {
+        summary = {
+          competitor: comp.name, blocked: snapshot.blocked, partial: snapshot.partial,
+          tier: snapshot.tier, error: snapshot.error,
+          catalogCount: snapshot.catalogCount, rankedCount: snapshot.rankedCount,
+        };
+        // Mark it visibly in the Sheet too. Preserves any existing product rows from prior
+        // good weeks; upserts one marker row keyed on a stable handle.
+        const label = snapshot.blocked ? 'BLOCKED' : 'PARTIAL';
+        console.log(`  ${label} — flagged in report${sheets ? ' + Sheet marker' : ''} (snapshot not saved).`);
         if (sheets) {
-          const marker = {
+          const marker = snapshot.blocked ? {
             handle: '__blocked__',
             title: '⚠️ BLOCKED — no data this week (manual check recommended)',
             url: comp.baseUrl, productType: '',
@@ -173,13 +177,28 @@ async function main() {
             status: 'Blocked',
             wk2Rank: null, wk3Rank: null, monthChange: null, streak: null, avgRank: null,
             hotStreak: null, spike: null, consistentTop10: null,
+          } : {
+            handle: '__partial__',
+            title: `⚠️ PARTIAL — incomplete crawl this week (${snapshot.rankedCount} ranked / ${snapshot.catalogCount} catalog before an early stop; manual check recommended)`,
+            url: comp.baseUrl, productType: '',
+            lastRank: null, thisRank: null, wow: null,
+            status: 'Partial',
+            wk2Rank: null, wk3Rank: null, monthChange: null, streak: null, avgRank: null,
+            hotStreak: null, spike: null, consistentTop10: null,
           };
           await writeCompetitorTab(sheets, cfg.sheetId, comp.name, [marker], date);
         }
-      } else if (sheets) {
-        await writeCompetitorTab(sheets, cfg.sheetId, comp.name, rows, date);
-      }
-      if (!snapshot.blocked) {
+      } else {
+        // Use the freshly-built snapshot as "this week" + prior weeks from disk (dedup same
+        // date). Robust whether or not we saved, and avoids a disk round-trip.
+        const prior = (await loadSnapshots(comp.name)).filter(s => s.date !== snapshot.date);
+        const snaps = [snapshot, ...prior].slice(0, cfg.weeksToKeep);
+        const { rows, summary: sm } = computeMetrics(snaps, cfg);
+        summary = sm;
+        summary.blocked = false;
+        summary.partial = false;
+        summary.tier = snapshot.tier;
+        if (sheets) await writeCompetitorTab(sheets, cfg.sheetId, comp.name, rows, date);
         console.log(`  new ${summary.newCount} | removed ${summary.removedCount} | hotStreak ${summary.hotStreakCount} | top10 ${summary.consistentTop10Count} | up ${summary.moversUp.length} | down ${summary.moversDown.length}`);
       }
     } catch (e) {

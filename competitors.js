@@ -123,8 +123,9 @@ async function doAdd(name, url, collection) {
   console.log(`\nCapturing baseline snapshot for "${name}"...`);
   const date = localDate(cfg.reportTz || 'Asia/Manila');
   const snapshot = await buildSnapshot(entry, cfg, date);
-  if (snapshot.blocked) {
-    console.log(`⚠️  Baseline snapshot failed (${snapshot.error || 'blocked'}) — no baseline saved. It'll get its first snapshot on the next weekly run instead.`);
+  if (snapshot.blocked || snapshot.partial) {
+    const label = snapshot.blocked ? 'blocked' : 'partial (a mid-crawl wall stopped it early)';
+    console.log(`⚠️  Baseline snapshot ${label} (${snapshot.error || label}) — no baseline saved. It'll get its first snapshot on the next weekly run instead.`);
     return;
   }
   await saveSnapshot(snapshot, entry);

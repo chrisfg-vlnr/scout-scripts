@@ -205,9 +205,22 @@ repo that `~/scripts/competitor-tracker/` lives in — matching the pattern alre
 
 1. JSON catalog + HTML rank (normal).
 2. HTML rank only / catalog only (degraded — logged).
-3. **Blocked** (e.g. Cloudflare 409): never crashes the run. Flagged in both the Discord report
-   and the Sheet (marker row keyed on handle `__blocked__`). A blocked week's snapshot is **not
-   saved**, so the next successful week still baselines against the last good week.
+3. **Blocked** (e.g. Cloudflare 403/409/429 on page 1 — no usable data at all): never crashes the
+   run. Flagged in both the Discord report and the Sheet (marker row keyed on handle
+   `__blocked__`). A blocked week's snapshot is **not saved**, so the next successful week still
+   baselines against the last good week.
+4. **Partial** (a persistent 429/5xx/network wall hit *past* page 1, after some real data was
+   already collected — e.g. Cloudflare bot-mitigation kicking in mid-crawl): distinct from both
+   of the above. `scrapeBestsellerRanks()`/`fetchCatalog()` keep whatever they collected instead
+   of discarding it, but `buildSnapshot()` marks the whole snapshot `partial: true` (tier string
+   gets a `— PARTIAL (incomplete crawl)` suffix) rather than letting a truncated crawl pass as a
+   clean, complete week. Handled the same way as a full block for safety: flagged in Discord, a
+   `__partial__` marker row in the Sheet (real counts included, e.g. "448 ranked / 0 catalog
+   before an early stop"), and the snapshot is **not saved** — a partial catalog would otherwise
+   mislabel every not-yet-reached product as "Removed From Store" the next time a run reaches
+   further. (Fixed 2026-07-17 — see the Primer's Execution Log. Before this fix, a mid-crawl wall
+   was silently indistinguishable from Shopify signaling "no more pages," so a wall-hit crawl was
+   reported as a complete, trustworthy week with no error surfaced anywhere.)
 
 ## Error handling
 

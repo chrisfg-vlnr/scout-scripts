@@ -162,7 +162,14 @@ function makeJunkMatcher(patterns) {
   return h => res.some(re => re.test(h));
 }
 
-// Returns { ok, blocked, handles:[...rank order], pages, error }
+// Returns { ok, blocked, partial, handles:[...rank order], pages, error }
+//
+// `blocked` = no usable data at all (page 1 itself failed, or an explicit 403/409/401/430).
+// `partial` = real data was collected, but a page past page 1 hit a persistent 429/5xx/network
+// wall (politeFetch exhausted all retries — its `status: null` sentinel) rather than Shopify
+// signaling a clean end of pagination (a concrete status like 404, or a 200 with an empty grid).
+// Conflating these two was the original bug: a mid-crawl wall silently looked identical to
+// "reached the last page," so a blocked/partial crawl was reported as a complete one.
 export async function scrapeBestsellerRanks(competitor, cfg) {
   const base = competitor.baseUrl.replace(/\/+$/, '');
   const col  = competitor.collection || 'all';
@@ -171,7 +178,7 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
 
   const seen = new Set();
   const ranked = [];
-  let page = 1, blocked = false, error = null, emptyOrDupPages = 0;
+  let page = 1, blocked = false, partial = false, error = null, emptyOrDupPages = 0;
 
   while (page <= cap) {
     const url = `${base}/collections/${col}?sort_by=best-selling&page=${page}`;
@@ -180,8 +187,16 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
       blocked = true; error = `HTTP ${r.status}`; break;
     }
     if (!r.ok || !r.text) {
-      // 404 / empty past the end → stop; first-page failure → blocked
-      if (page === 1) { blocked = true; error = r.error || `HTTP ${r.status}`; }
+      if (page === 1) {
+        // First page failed outright — no usable data at all.
+        blocked = true; error = r.error || `HTTP ${r.status}`;
+      } else if (r.status === null) {
+        // politeFetch exhausted every retry on a persistent 429/5xx/network failure — a real
+        // wall, not Shopify saying "no more pages." Keep whatever we collected before it.
+        partial = true; error = `wall hit at page ${page} (${r.error || 'retries exhausted'})`;
+      }
+      // else: a concrete non-ok status past page 1 (e.g. 404) — treat as the natural end of
+      // pagination, same as an empty grid below.
       break;
     }
     const pageHandles = extractGridHandles(r.text);
@@ -201,7 +216,7 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
     page++;
     if (page % 25 === 0) console.error(`    [${competitor.name}] rank scrape page ${page}, ${ranked.length} ranked so far...`);
   }
-  return { ok: ranked.length > 0 && !blocked, blocked, handles: ranked, pages: page - 1, error };
+  return { ok: ranked.length > 0 && !blocked, blocked, partial, handles: ranked, pages: page - 1, error };
 }
 
 // ─── fast tier detection (page-1 only) — for add-time checks ───────────────────
@@ -244,6 +259,7 @@ export async function buildSnapshot(competitor, cfg, date) {
     date,
     tier: null,
     blocked: false,
+    partial: false,
     error: null,
     catalogCount: 0,
     rankedCount: 0,
@@ -295,7 +311,22 @@ export async function buildSnapshot(competitor, cfg, date) {
   out.coverage     = out.catalogCount > 0 ? out.rankedCount / out.catalogCount : (out.rankedCount > 0 ? 1 : 0);
   out.tier = ranks.ok ? (catalog.ok ? 'Tier 1+2 (JSON catalog + HTML rank)' : 'Tier 2 (HTML rank only)')
                       : 'Tier 2-partial (catalog only, no rank)';
-  if (!ranks.ok && catalog.ok) out.error = `rank scrape failed: ${ranks.error || 'no ranks'}`;
+
+  // A mid-crawl wall on the rank scrape, and/or a blocked catalog fetch, both mean this
+  // snapshot is real but INCOMPLETE — distinct from the "no usable data at all" Tier 3 case
+  // above (which already returned). Flag it visibly rather than let it pass as a clean,
+  // complete week — the same silent-truncation failure mode this fix addresses, one level up.
+  const partialNotes = [];
+  if (ranks.partial) partialNotes.push(`rank scrape: ${ranks.error} — ${ranks.handles.length} ranked before stopping`);
+  if (catalog.blocked) partialNotes.push(`catalog fetch: ${catalog.error || 'blocked'}`);
+  if (partialNotes.length) {
+    out.partial = true;
+    out.tier += ' — PARTIAL (incomplete crawl)';
+    out.error = partialNotes.join(' | ');
+  } else if (!ranks.ok && catalog.ok) {
+    out.error = `rank scrape failed: ${ranks.error || 'no ranks'}`;
+  }
+
   return out;
 }
 
