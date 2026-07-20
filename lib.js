@@ -124,6 +124,7 @@ export async function fetchCatalog(competitor, cfg) {
     catch { blocked = true; error = 'catalog non-JSON (blocked?)'; break; }
     const products = Array.isArray(data.products) ? data.products : [];
     if (products.length === 0) break;
+    const sizeBefore = byHandle.size;
     for (const p of products) {
       if (!p.handle) continue;
       byHandle.set(p.handle, {
@@ -133,6 +134,15 @@ export async function fetchCatalog(competitor, cfg) {
         id: p.id ?? null,
         url: `${base}/products/${p.handle}`,
       });
+    }
+    // A page that adds no NEW handles means the server is repeating itself (some hosts
+    // ignore the `page` param when erroring or serving cached content). Without this
+    // break the loop would grind through all maxPagesSafety (800) identical pages —
+    // ~half an hour of wasted, impolite requests per competitor. Mirrors the
+    // added===0 end-of-catalog break in scrapeBestsellerRanks().
+    if (byHandle.size === sizeBefore) {
+      console.error(`    [${competitor.name}] catalog page ${page} returned no new products — treating as end of catalog.`);
+      break;
     }
     if (products.length < 250) break;
     page++;

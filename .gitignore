@@ -6,3 +6,4 @@ data/
 
 # Node modules
 node_modules/
+.run.lock

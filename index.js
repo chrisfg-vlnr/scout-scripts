@@ -16,6 +16,16 @@ import {
 
 // ─── args ──────────────────────────────────────────────────────────────────────
 
+const USAGE = `Usage: node index.js [flags]
+  --only <Name>         run a single competitor (exact name or slug)
+  --date YYYY-MM-DD     override the run date
+  --max-rank-pages N    cap HTML rank pages per competitor (testing)
+  --no-sheet            skip Google Sheet writes
+  --no-discord          print report preview instead of posting to Discord
+  --no-save             do not persist snapshots
+  --no-prune            do not prune old snapshots
+  --help                show this help and exit`;
+
 function parseArgs(argv) {
   const a = { noSheet: false, noDiscord: false, noSave: false, noPrune: false, only: null, date: null, maxRankPages: null };
   for (let i = 2; i < argv.length; i++) {
@@ -27,8 +37,48 @@ function parseArgs(argv) {
     else if (v === '--only') a.only = argv[++i];
     else if (v === '--date') a.date = argv[++i];
     else if (v === '--max-rank-pages') a.maxRankPages = parseInt(argv[++i], 10);
+    else if (v === '--help' || v === '-h') { console.log(USAGE); process.exit(0); }
+    else {
+      // Unknown flags are a hard error. Before this guard, "node index.js --help" silently
+      // launched a FULL 8-competitor scrape (unknown flags were ignored) — that exact accident
+      // spawned an orphaned duplicate run on 2026-07-20 that rate-limit-walled belroshop.com.
+      console.error(`Unknown flag: ${v}\n\n${USAGE}`);
+      process.exit(1);
+    }
   }
   return a;
+}
+
+// ─── run lock ──────────────────────────────────────────────────────────────────
+// Refuse to run two scrapes at once. On 2026-07-20 two overlapping full runs hit
+// belroshop.com concurrently from this VPS and tripped its 429 rate-limit wall — the
+// same crawl had always passed clean as a single weekly run. The lock holds
+// {pid, startedAt}; a lock whose pid is no longer alive is stale and gets replaced.
+
+const LOCK_PATH = `${ROOT}/.run.lock`;
+
+async function acquireRunLock() {
+  try {
+    const raw = JSON.parse(await fs.readFile(LOCK_PATH, 'utf8'));
+    let alive = false;
+    try { process.kill(raw.pid, 0); alive = true; }
+    catch (e) { alive = e.code === 'EPERM'; }
+    if (alive) {
+      console.error(`Another tracker run is already in progress (pid ${raw.pid}, started ${raw.startedAt}).`);
+      console.error(`Refusing to start a second one — overlapping scrapes trip rate-limit walls.`);
+      console.error(`If pid ${raw.pid} is not actually a tracker run, delete ${LOCK_PATH} and retry.`);
+      process.exit(3);
+    }
+  } catch { /* no lock, or unreadable — take it */ }
+  await fs.writeFile(LOCK_PATH, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+}
+
+async function releaseRunLock() { try { await fs.unlink(LOCK_PATH); } catch {} }
+
+// Best-effort release on SIGINT/SIGTERM (SIGKILL leaves a stale lock; the pid-alive
+// check above handles that on the next start).
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => { releaseRunLock().finally(() => process.exit(1)); });
 }
 
 function localDate(tz) {
@@ -124,6 +174,15 @@ function buildCompetitorReport(summary, prettyDate) {
 
 async function main() {
   const args = parseArgs(process.argv);
+  await acquireRunLock();
+  try {
+    await run(args);
+  } finally {
+    await releaseRunLock();
+  }
+}
+
+async function run(args) {
   const cfg = await loadConfig();
   const reportTz = cfg.reportTz || 'Asia/Manila';
   const date = args.date || localDate(reportTz);

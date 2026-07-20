@@ -25,7 +25,19 @@ node /home/chris/scripts/scout-competitor-tracker/index.js --only Feanatic # one
 node /home/chris/scripts/scout-competitor-tracker/index.js --date 2026-06-30
 node /home/chris/scripts/scout-competitor-tracker/index.js --no-discord --no-sheet   # dry preview
 node /home/chris/scripts/scout-competitor-tracker/index.js --max-rank-pages 10       # cap pages (testing)
+node /home/chris/scripts/scout-competitor-tracker/index.js --help                    # usage (added 2026-07-20)
 ```
+
+**Guards (added 2026-07-20, after overlapping manual runs rate-limit-walled belroshop.com):**
+
+- **Unknown flags hard-fail** with a usage message, exit 1. (Before this, `--help` was silently
+  ignored and launched a full 8-competitor scrape.)
+- **`.run.lock` concurrency guard** — a second run while one is live refuses with **exit 3**
+  and points at the lock file. Stale locks (dead pid) are replaced automatically; only delete
+  `.run.lock` by hand if you've confirmed the pid in it is not a tracker run.
+- **Manual full reruns go through the registered cron job**, not a raw `node index.js`:
+  `openclaw cron run 34357ef3-6885-4d40-a406-b3b16a46a92e` (payload timeout 5400s, per-job).
+  Max one manual rerun per day — repeated same-day crawls escalate Cloudflare-style walls.
 
 **Cron:** `scout-competitor-tracker-weekly` — Monday 10:30 AM Manila (30 min after CFNCS's own
 `competitor-tracker-weekly` — avoids same-minute overlap, not a hard requirement), `--command`

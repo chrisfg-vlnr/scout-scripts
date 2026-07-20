@@ -29,7 +29,12 @@
   "competitors": [
     {"name":"NouveauRiche","baseUrl":"https://nouveauriche-official.com","collection":"all","enabled":true},
     {"name":"ByEmiliaRose","baseUrl":"https://byemiliarose.com","collection":"all","enabled":true},
-    {"name":"Feanatic","baseUrl":"https://feanatic.com","collection":"all","enabled":true}
+    {"name":"Feanatic","baseUrl":"https://feanatic.com","collection":"all","enabled":true},
+    {"name":"BelroShop","baseUrl":"https://belroshop.com","collection":"all","enabled":true},
+    {"name":"HausOfMode","baseUrl":"https://hausofmode.de","collection":"all","enabled":true},
+    {"name":"Drune","baseUrl":"https://drune.de","collection":"all","enabled":true},
+    {"name":"LozendaFashion","baseUrl":"https://lozendafashion.com","collection":"all","enabled":true},
+    {"name":"Gartenort","baseUrl":"https://gartenort.de","collection":"all","enabled":true}
   ],
-  "lastAddAtMs": 1784032010193
+  "lastAddAtMs": 1784145399845
 }
