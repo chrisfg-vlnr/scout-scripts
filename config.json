@@ -34,7 +34,8 @@
     {"name":"HausOfMode","baseUrl":"https://hausofmode.de","collection":"all","enabled":true},
     {"name":"Drune","baseUrl":"https://drune.de","collection":"all","enabled":true},
     {"name":"LozendaFashion","baseUrl":"https://lozendafashion.com","collection":"all","enabled":true},
-    {"name":"Gartenort","baseUrl":"https://gartenort.de","collection":"all","enabled":true}
+    {"name":"Gartenort","baseUrl":"https://gartenort.de","collection":"all","enabled":true},
+    {"name":"CristalliSchwiiz","baseUrl":"https://crystalli-schwiiz.com","collection":"all","enabled":true}
   ],
-  "lastAddAtMs": 1784145399845
+  "lastAddAtMs": 1784553582051
 }
