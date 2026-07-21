@@ -437,3 +437,39 @@ only, never credential values. Append, don't rewrite.)*
   slip past `junkHandlePatterns` because those patterns are English-only and this store uses
   Dutch/German handles. Affects any non-English store's top ranks cosmetically — worth a follow-up if
   Chris wants localized junk patterns.
+
+**2026-07-21 (later still) — Batch A end-to-end verification + a BIGGER root-cause finding (auth-reload restarts):**
+- **Batch A completed OK through the real cron job:** status `ok`, 36.5 min, all 5 attempted, "Discord
+  report sent". (The `openclaw cron run --wait` CLI returned exit 1 with a GatewayTransportError, but
+  that was the CLI's polling socket dropping when the gateway restarted **1 second after** the job
+  finished — not a job failure. Always confirm via `cron runs --id` diagnostics, not the --wait exit.)
+- **BUT the run was polluted by self-inflicted 429 rate-limiting** from repeated same-night scraping
+  (verification hit these domains 3–4× in a few hours): NouveauRiche PARTIAL (429 wall p3),
+  **ByEmiliaRose BLOCKED (429 — was clean the day before)**, Gartenort clean, **CristalliSchwiiz
+  PARTIAL (429 wall at page 817, 51%)** vs. the clean 99.98% recapture an hour earlier, DriftAndTide
+  clean. Lesson reaffirmed (same as 07-20 BelroShop): back-to-back same-day scrapes escalate 429
+  walls. This is a testing artifact, NOT a Monday-schedule problem (weekly cadence won't do this).
+- **The capped-vs-partial distinction worked correctly under fire:** CristalliSchwiiz's 429 wall at
+  page 817 was flagged **PARTIAL** (a real rate-limit wall — `status:null` retries-exhausted), NOT
+  `capped` (which is only a clean 200 at the page-budget ceiling), and was **not** saved as baseline —
+  so the good 99.98% recapture snapshot was preserved intact (verified: `partial:false capped:false`
+  on disk). Exactly the designed behavior.
+- **Runtime caveat:** the 36.5-min figure is an UNDER-estimate because CristalliSchwiiz was cut short
+  at page 817 by the 429 instead of running its full ~1,600 pages. A HEALTHY Batch A ≈ ~64 min
+  (recapture's clean ~57-min CristalliSchwiiz + ~5 min for the small stores), comfortably inside the
+  5400s (90-min) budget (~26 min margin). A clean full-runtime measurement should come from Monday's
+  real run or a re-run after the domains cool off — not from more same-night scraping.
+- **⭐ ROOT CAUSE FINDING (the real recurring one, bigger than batching/timeout/lock):** the gateway
+  restart that grazed this run — AND the original 07-20 incident — is triggered by **Anthropic
+  auth-config reloads** (`auth.order.anthropic` / `auth.profiles.default` / `models.providers.anthropic`
+  — consistent with periodic OAuth token refreshes rewriting the config). OpenClaw's reload logic DOES
+  try to protect an in-flight run — it detected the batch-A cron task and **deferred** the restart,
+  re-checking every 30s — **but caps the defer at ~2 min**, then restarts anyway (SIGUSR1 → full
+  process restart → cgroup SIGTERM kills the child scrape). Observed reloads: 07-20 07:48 CEST
+  (13:48 Manila), 07-21 09:00 CEST (15:00 Manila) — both ~daily and both AFTER the 10:30–13:00 Manila
+  batch window (mildly reassuring, but only 2 data points). **This is NOT fixable in Scout's scripts** —
+  it's OpenClaw platform behavior. A real fix is Chris's call: e.g. pin/settle Anthropic auth so it
+  doesn't rewrite config mid-day, raise the reload defer window past a batch's runtime, run batches
+  when reloads are unlikely, or make `--command` cron jobs survive a gateway restart. Scout's SIGTERM
+  handler now at least releases `.run.lock` cleanly on the kill (no orphan — an improvement over 07-20),
+  and `partial`/blocked handling means a killed run never corrupts a baseline.
