@@ -35,7 +35,11 @@
     {"name":"Drune","baseUrl":"https://drune.de","collection":"all","enabled":true},
     {"name":"LozendaFashion","baseUrl":"https://lozendafashion.com","collection":"all","enabled":true},
     {"name":"Gartenort","baseUrl":"https://gartenort.de","collection":"all","enabled":true},
-    {"name":"CristalliSchwiiz","baseUrl":"https://crystalli-schwiiz.com","collection":"all","enabled":true}
+    {"name":"CristalliSchwiiz","baseUrl":"https://crystalli-schwiiz.com","collection":"all","enabled":true},
+    {"name":"JenniferJohnCharleston","baseUrl":"https://jenniferjohn-charleston.com","collection":"all","enabled":true},
+    {"name":"BreuerMode","baseUrl":"https://breuermode.de","collection":"all","enabled":true},
+    {"name":"RisoraShop","baseUrl":"https://risora-shop.de","collection":"all","enabled":true},
+    {"name":"DriftAndTide","baseUrl":"https://www.driftandtide.com","collection":"all","enabled":true}
   ],
-  "lastAddAtMs": 1784553582051
+  "lastAddAtMs": 1784596812594
 }
