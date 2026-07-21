@@ -326,3 +326,67 @@ only, never credential values. Append, don't rewrite.)*
   (500/500), both reported via the Tier 3 marker flow as designed. Capacity note: at 8
   competitors a clean run is ~51 min; if the team grows toward the 15 cap (or adds another
   HausOfMode-sized store), the 5400s budget will need revisiting.
+
+**2026-07-21 — 5 new baselines captured (4 team-added domains + CristalliSchwiiz), repo/primer housekeeping, 3 investigations (report-only):**
+- **Baselines confirmed via query.js + direct Sheet API check (not just local file existence):**
+  JenniferJohnCharleston (1,214 catalog, added + baseline by Scout live in Discord, sequential,
+  generous timeout — followed the just-added AGENTS.md guidance correctly), BreuerMode (2,134,
+  same), RisoraShop (2,174 — added by Scout but its Discord completion message was never sent,
+  see Investigation C below), DriftAndTide (970 — its queued add silently never fired until
+  Michel asked for confirmation 6.5h later, see Investigation C), and CristalliSchwiiz (19,183
+  catalog / 9,596 ranked, captured this session in the background per the ≥1800s-timeout lesson
+  from its earlier interrupted attempt — see finding below). All 5 Sheet tabs verified to exist
+  with real, non-trivial row counts via a direct Sheets API read, not assumed from local files.
+- **New finding — CristalliSchwiiz hit the global 800-page rank-scrape safety cap
+  (`config.json` → `fetch.maxPagesSafety`) while still actively finding new products (page 800
+  added 299 more ranked products in that single page-block, no slowdown).** Result: 9,596 ranked
+  / 19,183 catalog = 50% coverage — flagged by the *existing* <60%-coverage warning in the
+  Discord report/Sheet, but that warning's wording ("store may hide products from HTML") is
+  misleading here; the real cause is the page cap, not the store. `competitor.maxRankPages` is
+  already a supported per-competitor override field in `lib.js` (used by `--max-rank-pages`),
+  just not set for CristalliSchwiiz. This is the first competitor to ever hit the cap — its
+  best-selling grid is roughly 3× sparser than HausOfMode's (~12 net-new ranked/page vs. ~35).
+  **Not fixed this session** (needs a real decision: raise the global cap, set a per-competitor
+  override, or add a distinct "capped" flag mirroring the existing blocked/partial distinction) —
+  reported to Chris for a call, per the same report-don't-silently-fix pattern as the two
+  investigations below.
+- **Repo/primer housekeeping:** `chrisfg-vlnr/scout-scripts` remote does not exist yet on GitHub
+  (SSH auth confirmed working — same key as `palantir-scripts` — but the repo itself was never
+  created) — still pending Chris; nothing pushed. This primer file itself moved from `~/scripts/`
+  (untracked, sitting inside the unrelated `palantir-scripts` repo by accident since build time)
+  into `~/scripts/scout-competitor-tracker/` and is now version-controlled in `scout-scripts`;
+  `AGENTS.md`/`TOOLS.md` path references updated to match.
+- **Investigation A (report-only, zero edits to Palantir's files):** none of today's 5 Scout
+  fixes are currently live hazards for Palantir's internal tracker (last 2 runs: 25.7 min and
+  27.7 min, both clean, well under its own 2400s timeout) — but the unknown-flag hard-fail and
+  `fetchCatalog()` dup-page-break hazards are confirmed present in Palantir's code identically to
+  Scout's pre-fix state, recommended as cheap zero-risk ports regardless of urgency. The timeout
+  headroom fix is a ticking clock — Palantir is already at Scout's pre-incident competitor count
+  (8). The `.run.lock` guard and rerun-policy doc matter less for Palantir since its real-world
+  usage (trusted internal Telegram staff, `cron run --wait` already the established manual-rerun
+  convention per its own AGENTS.md) is inherently safer than Scout's external-Discord exposure.
+  Also flagged: Palantir's config has `driftandtide.com` as `enabled: true` (not disabled, correcting
+  the task's premise) — same domain (minus `www.`) just added to Scout, worth Chris confirming
+  it's an intentional overlap with the team, not a mix-up. Not implemented — Chris's call.
+- **Investigation B (report-only, options not weighed against each other):** at 13 competitors
+  (≥51,500 combined catalog vs. today's 8-competitor 26,544), a naive extrapolation of today's
+  51.2-min run lands close to or past the current 5400s budget — and CristalliSchwiiz's own
+  ~29-min capture (19,183 catalog, sparse grid) is a live data point supporting that. Laid out 3
+  real options: keep raising the single job's timeout (simplest, no scaling fix), split into
+  staggered cron jobs (bounded per-job runtime, needs real code changes — per-batch lock paths,
+  a group selector, a "batch N of M" report header), or restructure for concurrency across
+  different domains (only option that shrinks total time, biggest code change, but a materially
+  different — and safe — kind of concurrency than what caused today's incident, since it's
+  across different domains rather than repeat hits on the same one). Not implemented.
+- **Investigation C (report-only, prompted mid-session by Chris's build-partner in the other
+  Claude chat):** confirmed via full-text session review that (1) Scout never sent a Discord
+  completion message for RisoraShop or DriftAndTide — the channel saw "adding it now" then
+  silence for 6.5 hours, indistinguishable from failure — while JenniferJohnCharleston and
+  BreuerMode both got correct done-confirmations, so this is inconsistency (dropped only when a
+  new request interrupted the poll loop before the done step), not a missing capability; and (2)
+  Scout explicitly stated a commitment it had no mechanism to keep — *"I'll do risora →
+  driftandtide in order"* — while having no heartbeat (`every: "0m"`) and no persistent task
+  queue across idle gaps. DriftAndTide only got added because Michel happened to ask for
+  confirmation later; if he hadn't, it simply would never have been added despite Scout's stated
+  plan. Proposed AGENTS.md language drafted (a new "never imply follow-through you can't
+  guarantee" section) but **not applied** — for Chris and the build-partner to review/edit first.
