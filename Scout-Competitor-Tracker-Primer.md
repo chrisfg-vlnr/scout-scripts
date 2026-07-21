@@ -473,3 +473,37 @@ only, never credential values. Append, don't rewrite.)*
   when reloads are unlikely, or make `--command` cron jobs survive a gateway restart. Scout's SIGTERM
   handler now at least releases `.run.lock` cleanly on the kill (no orphan — an improvement over 07-20),
   and `partial`/blocked handling means a killed run never corrupts a baseline.
+
+**2026-07-21 (final) — Auth-reload restart root cause: investigated deeply, claude-CLI theory DISPROVED for this box (CORRECTS the entry above):**
+- The entry above speculated the gateway restarts were "consistent with periodic OAuth token
+  refreshes." A focused investigation this session **disproved that for this VPS** — do not chase the
+  OAuth/claude-CLI theory here. Evidence:
+  - **No Anthropic oauth / claude-CLI-reuse profile exists on this box.** `openclaw.json`
+    `auth.profiles.default` is `{provider: anthropic, mode: api_key}` (static). `auth.order.anthropic`
+    = `[default, anthropic:default, scout, anthropic:nica]` — all `api_key`. `openclaw.json` has zero
+    references to `claude-cli` / `claudeAiOauth` / `~/.claude/.credentials.json`.
+  - **Timestamps do NOT line up** (the decisive test). Restarts were 07-20 05:48 UTC and 07-21 07:00
+    UTC. The 4 fleet agents' `auth-profiles.json` (static keys) are all mtime **2026-06-24** (a month
+    old). This Claude Code session's own OAuth store (`~/.claude/.credentials.json`, an ~8 h-rotating
+    "Claude Pro" login) mtime was **01:29 UTC** — 5.5 h off the 07:00 restart, unrelated to either.
+    Every file written *around* the 07:00 restart (agent sqlites, device-auth, openclaw.json) was
+    stamped 07:00–07:05, i.e. **after** the 07:00:08 trigger — startup re-init, not the cause.
+  - The general GitHub pattern (Claude-CLI-reuse token rotation → "auth config changed" restart) is
+    real, but **this box is already on the static-API-key setup those issues recommend as the fix** —
+    which is exactly why there's nothing to rotate and the timing doesn't match.
+- **What the evidence points to instead:** the restart is tripped by an `openclaw.json` config-save
+  that re-serializes the auth block. Right before the 07:00 event the log shows a `models.authStatus`
+  check → "Updated config … Auth profile: default (anthropic/api_key)". So the likely trigger is
+  **OpenClaw's own periodic auth-status re-validation re-writing the config**, which the reload
+  detector flags as `auth.profiles.default` / `auth.order.anthropic` "changed" — independent of any
+  token. (A stale `.bak` diff reinforced this: a routine write there changed only an unrelated field,
+  `nica-p2test tools.profile`, yet still re-serialized the whole auth block.)
+- **Not fully pinned** (only 2 data points; exact internal trigger needs OpenClaw docs/source — not
+  guessed from source per the suggestion rule). Deliberately did NOT run `openclaw models status
+  --probe` to confirm live, because a `models.authStatus`/probe is plausibly the very thing that
+  re-saves config and triggers a restart. **No fix applied** (timestamps disprove the theory; the
+  default profile is already static — nothing to convert).
+- **Applies fleet-wide, NOT just Scout:** any long-running `--command` cron is exposed, including
+  Palantir's competitor-tracker (see its SKILL.md). The real levers are platform-side (extend
+  OpenClaw's ~2-min restart-defer to actually wait for an active cron task, or make `--command` jobs
+  survive a gateway restart) — Chris's call at the OpenClaw level.
