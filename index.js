@@ -18,6 +18,11 @@ import {
 
 const USAGE = `Usage: node index.js [flags]
   --only <Name>         run a single competitor (exact name or slug)
+  --group <A|B|...>     run only competitors whose config "batch" matches (staggered weekly batches)
+  --include-ungrouped   with --group: also run enabled competitors that have no batch assigned
+                        (the catch-all batch uses this so a new competitor is never silently skipped)
+  --wait-for-lock N     if another run holds the lock, wait up to N seconds for it before giving up
+                        (staggered batches use this so a slightly-overrunning batch doesn't fail the next)
   --date YYYY-MM-DD     override the run date
   --max-rank-pages N    cap HTML rank pages per competitor (testing)
   --no-sheet            skip Google Sheet writes
@@ -27,7 +32,7 @@ const USAGE = `Usage: node index.js [flags]
   --help                show this help and exit`;
 
 function parseArgs(argv) {
-  const a = { noSheet: false, noDiscord: false, noSave: false, noPrune: false, only: null, date: null, maxRankPages: null };
+  const a = { noSheet: false, noDiscord: false, noSave: false, noPrune: false, only: null, group: null, includeUngrouped: false, waitForLock: 0, date: null, maxRankPages: null };
   for (let i = 2; i < argv.length; i++) {
     const v = argv[i];
     if (v === '--no-sheet') a.noSheet = true;
@@ -35,6 +40,9 @@ function parseArgs(argv) {
     else if (v === '--no-save') a.noSave = true;
     else if (v === '--no-prune') a.noPrune = true;
     else if (v === '--only') a.only = argv[++i];
+    else if (v === '--group') a.group = argv[++i];
+    else if (v === '--include-ungrouped') a.includeUngrouped = true;
+    else if (v === '--wait-for-lock') a.waitForLock = parseInt(argv[++i], 10) || 0;
     else if (v === '--date') a.date = argv[++i];
     else if (v === '--max-rank-pages') a.maxRankPages = parseInt(argv[++i], 10);
     else if (v === '--help' || v === '-h') { console.log(USAGE); process.exit(0); }
@@ -57,19 +65,36 @@ function parseArgs(argv) {
 
 const LOCK_PATH = `${ROOT}/.run.lock`;
 
-async function acquireRunLock() {
+// Read the current lock holder if one is alive; returns {pid, startedAt} or null (no lock, or a
+// stale lock whose pid is dead — either way the caller may take it).
+async function liveLockHolder() {
   try {
     const raw = JSON.parse(await fs.readFile(LOCK_PATH, 'utf8'));
-    let alive = false;
-    try { process.kill(raw.pid, 0); alive = true; }
-    catch (e) { alive = e.code === 'EPERM'; }
-    if (alive) {
-      console.error(`Another tracker run is already in progress (pid ${raw.pid}, started ${raw.startedAt}).`);
+    try { process.kill(raw.pid, 0); return raw; }
+    catch (e) { return e.code === 'EPERM' ? raw : null; }
+  } catch { return null; }
+}
+
+// `waitForLockSeconds` = 0 → fail fast (exit 3) if a run is already live — the right default for a
+// manual/ad-hoc run. Staggered batch crons pass a positive value so a slightly-overrunning earlier
+// batch makes the next one wait rather than fail (this closes the "a legitimate rerun had no safe
+// path" gap from the 2026-07-20 incident).
+async function acquireRunLock({ waitForLockSeconds = 0 } = {}) {
+  const deadline = Date.now() + waitForLockSeconds * 1000;
+  for (;;) {
+    const holder = await liveLockHolder();
+    if (!holder) break; // free or stale — take it
+    if (Date.now() >= deadline) {
+      console.error(`Another tracker run is already in progress (pid ${holder.pid}, started ${holder.startedAt}).`);
+      if (waitForLockSeconds > 0) console.error(`Waited ${waitForLockSeconds}s for it to finish; giving up.`);
       console.error(`Refusing to start a second one — overlapping scrapes trip rate-limit walls.`);
-      console.error(`If pid ${raw.pid} is not actually a tracker run, delete ${LOCK_PATH} and retry.`);
+      console.error(`If pid ${holder.pid} is not actually a tracker run, delete ${LOCK_PATH} and retry.`);
       process.exit(3);
     }
-  } catch { /* no lock, or unreadable — take it */ }
+    const remainMs = deadline - Date.now();
+    console.error(`Another run holds the lock (pid ${holder.pid}); waiting up to ${Math.ceil(remainMs / 1000)}s more...`);
+    await new Promise(r => setTimeout(r, Math.min(15000, remainMs)));
+  }
   await fs.writeFile(LOCK_PATH, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
 }
 
@@ -140,7 +165,9 @@ function buildCompetitorReport(summary, prettyDate) {
   const L = [];
   L.push(`📊 **${name} — WEEKLY RANK CHANGES**`);
   L.push(`Week of ${prettyDate} | ${summary.rankedCount} ranked / ${summary.catalogCount} catalog`);
-  if (summary.coverage > 0 && summary.coverage < 0.6) {
+  if (summary.capped) {
+    L.push(`⚠️ Rank coverage ${(summary.coverage * 100).toFixed(0)}% — the rank scrape hit the ${summary.cappedAt}-page cap, so only the top ${summary.rankedCount} best-sellers are ranked this week (the full catalog IS captured). Movers below that cutoff aren't tracked; raise this store's page cap to cover more.`);
+  } else if (summary.coverage > 0 && summary.coverage < 0.6) {
     L.push(`⚠️ Rank coverage ${(summary.coverage * 100).toFixed(0)}% — store may hide products from HTML.`);
   }
   if (!summary.hasPrior) {
@@ -174,7 +201,7 @@ function buildCompetitorReport(summary, prettyDate) {
 
 async function main() {
   const args = parseArgs(process.argv);
-  await acquireRunLock();
+  await acquireRunLock({ waitForLockSeconds: args.waitForLock });
   try {
     await run(args);
   } finally {
@@ -188,10 +215,21 @@ async function run(args) {
   const date = args.date || localDate(reportTz);
   const prettyDate = new Date(date + 'T12:00:00Z').toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
 
-  console.log(`Scout Competitor Tracker — run date ${date} (${reportTz})`);
+  console.log(`Scout Competitor Tracker${args.group ? ` — Batch ${args.group}` : ''} — run date ${date} (${reportTz})`);
 
   let competitors = cfg.competitors.filter(c => c.enabled);
-  if (args.only) competitors = cfg.competitors.filter(c => slug(c.name) === slug(args.only) || c.name.toLowerCase() === args.only.toLowerCase());
+  if (args.only) {
+    competitors = cfg.competitors.filter(c => slug(c.name) === slug(args.only) || c.name.toLowerCase() === args.only.toLowerCase());
+  } else if (args.group) {
+    // Staggered weekly batches: run only this batch's competitors. `--include-ungrouped` (the
+    // catch-all batch) also picks up any enabled competitor with no `batch` assigned, so a newly
+    // added store is never silently missed by every batch.
+    competitors = competitors.filter(c => c.batch === args.group || (args.includeUngrouped && !c.batch));
+    const orphaned = cfg.competitors.filter(c => c.enabled && !c.batch);
+    if (orphaned.length && !args.includeUngrouped) {
+      console.error(`  ⚠️ ${orphaned.length} enabled competitor(s) have NO batch and are not in group ${args.group}: ${orphaned.map(c => c.name).join(', ')}. They only run in the catch-all (--include-ungrouped) batch — assign them a batch or check that batch's cron.`);
+    }
+  }
   if (args.maxRankPages != null) competitors = competitors.map(c => ({ ...c, maxRankPages: args.maxRankPages }));
   console.log(`Competitors: ${competitors.map(c => c.name).join(', ') || '(none)'}`);
 
@@ -256,9 +294,14 @@ async function run(args) {
         summary = sm;
         summary.blocked = false;
         summary.partial = false;
+        // `capped` (rank scrape hit the page budget while still productive) is real, complete-
+        // catalog data — saved as baseline like a normal week, but surfaced so the report says
+        // "capped at page N" rather than passing as full coverage.
+        summary.capped = snapshot.capped;
+        summary.cappedAt = snapshot.cappedAt;
         summary.tier = snapshot.tier;
         if (sheets) await writeCompetitorTab(sheets, cfg.sheetId, comp.name, rows, date);
-        console.log(`  new ${summary.newCount} | removed ${summary.removedCount} | hotStreak ${summary.hotStreakCount} | top10 ${summary.consistentTop10Count} | up ${summary.moversUp.length} | down ${summary.moversDown.length}`);
+        console.log(`  new ${summary.newCount} | removed ${summary.removedCount} | hotStreak ${summary.hotStreakCount} | top10 ${summary.consistentTop10Count} | up ${summary.moversUp.length} | down ${summary.moversDown.length}${summary.capped ? ` | CAPPED at page ${summary.cappedAt}` : ''}`);
       }
     } catch (e) {
       console.error(`  ERROR ${comp.name}: ${e.message}`);
@@ -268,8 +311,9 @@ async function run(args) {
   }
 
   const sheetUrl = `https://docs.google.com/spreadsheets/d/${cfg.sheetId}/edit`;
-  const header = `🗓️ **Scout Competitor Scaling Tracker** — ${prettyDate}\n`
-    + `${competitors.length} competitor(s) tracked\n`
+  const batchLabel = args.group ? ` — Batch ${args.group}` : '';
+  const header = `🗓️ **Scout Competitor Scaling Tracker${batchLabel}** — ${prettyDate}\n`
+    + `${competitors.length} competitor(s)${args.group ? ' in this batch' : ' tracked'}\n`
     + `📋 <${sheetUrl}>`;
   if (!args.noDiscord && reports.length) {
     await sendDiscord(cfg.discordChannelId, header);

@@ -103,7 +103,11 @@ async function doAdd(name, url, collection) {
   const d = await detectTier({ name, baseUrl, collection: col }, cfg);
   console.log(`Result: ${tierLabel(d)}`);
 
-  const entry = { name, baseUrl, collection: col, enabled: true };
+  // Assign new competitors to the catch-all weekly batch ("B") so they're picked up by a
+  // staggered batch cron from the very next run. (Batch B's cron also runs --include-ungrouped
+  // as a backstop, so even an untagged competitor is never silently skipped — but tagging it
+  // here keeps config/--list explicit.) See SKILL.md → "Weekly batches".
+  const entry = { name, baseUrl, collection: col, enabled: true, batch: 'B' };
   cfg.competitors.push(entry);
   cfg.lastAddAtMs = Date.now();
   await saveConfig(cfg);

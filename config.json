@@ -27,19 +27,19 @@
     "donation"
   ],
   "competitors": [
-    {"name":"NouveauRiche","baseUrl":"https://nouveauriche-official.com","collection":"all","enabled":true},
-    {"name":"ByEmiliaRose","baseUrl":"https://byemiliarose.com","collection":"all","enabled":true},
-    {"name":"Feanatic","baseUrl":"https://feanatic.com","collection":"all","enabled":true},
-    {"name":"BelroShop","baseUrl":"https://belroshop.com","collection":"all","enabled":true},
-    {"name":"HausOfMode","baseUrl":"https://hausofmode.de","collection":"all","enabled":true},
-    {"name":"Drune","baseUrl":"https://drune.de","collection":"all","enabled":true},
-    {"name":"LozendaFashion","baseUrl":"https://lozendafashion.com","collection":"all","enabled":true},
-    {"name":"Gartenort","baseUrl":"https://gartenort.de","collection":"all","enabled":true},
-    {"name":"CristalliSchwiiz","baseUrl":"https://crystalli-schwiiz.com","collection":"all","enabled":true},
-    {"name":"JenniferJohnCharleston","baseUrl":"https://jenniferjohn-charleston.com","collection":"all","enabled":true},
-    {"name":"BreuerMode","baseUrl":"https://breuermode.de","collection":"all","enabled":true},
-    {"name":"RisoraShop","baseUrl":"https://risora-shop.de","collection":"all","enabled":true},
-    {"name":"DriftAndTide","baseUrl":"https://www.driftandtide.com","collection":"all","enabled":true}
+    {"name":"NouveauRiche","baseUrl":"https://nouveauriche-official.com","collection":"all","enabled":true,"batch":"A"},
+    {"name":"ByEmiliaRose","baseUrl":"https://byemiliarose.com","collection":"all","enabled":true,"batch":"A"},
+    {"name":"Feanatic","baseUrl":"https://feanatic.com","collection":"all","enabled":true,"batch":"B"},
+    {"name":"BelroShop","baseUrl":"https://belroshop.com","collection":"all","enabled":true,"batch":"B"},
+    {"name":"HausOfMode","baseUrl":"https://hausofmode.de","collection":"all","enabled":true,"batch":"B"},
+    {"name":"Drune","baseUrl":"https://drune.de","collection":"all","enabled":true,"batch":"B"},
+    {"name":"LozendaFashion","baseUrl":"https://lozendafashion.com","collection":"all","enabled":true,"batch":"B"},
+    {"name":"Gartenort","baseUrl":"https://gartenort.de","collection":"all","enabled":true,"batch":"A"},
+    {"name":"CristalliSchwiiz","baseUrl":"https://crystalli-schwiiz.com","collection":"all","enabled":true,"maxRankPages":2000,"batch":"A"},
+    {"name":"JenniferJohnCharleston","baseUrl":"https://jenniferjohn-charleston.com","collection":"all","enabled":true,"batch":"B"},
+    {"name":"BreuerMode","baseUrl":"https://breuermode.de","collection":"all","enabled":true,"batch":"B"},
+    {"name":"RisoraShop","baseUrl":"https://risora-shop.de","collection":"all","enabled":true,"batch":"B"},
+    {"name":"DriftAndTide","baseUrl":"https://www.driftandtide.com","collection":"all","enabled":true,"batch":"A"}
   ],
   "lastAddAtMs": 1784596812594
 }

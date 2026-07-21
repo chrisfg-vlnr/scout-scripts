@@ -35,17 +35,40 @@ node /home/chris/scripts/scout-competitor-tracker/index.js --help               
 - **`.run.lock` concurrency guard** — a second run while one is live refuses with **exit 3**
   and points at the lock file. Stale locks (dead pid) are replaced automatically; only delete
   `.run.lock` by hand if you've confirmed the pid in it is not a tracker run.
-- **Manual full reruns go through the registered cron job**, not a raw `node index.js`:
-  `openclaw cron run 34357ef3-6885-4d40-a406-b3b16a46a92e` (payload timeout 5400s, per-job).
+- **Manual reruns go through the registered cron job(s)**, not a raw `node index.js`. Rerun only
+  the batch that needs it: `openclaw cron run 34357ef3-6885-4d40-a406-b3b16a46a92e` (Batch A) /
+  `openclaw cron run 05acdb9e-dae7-43b6-8fcf-7d0e87e41488` (Batch B).
   Max one manual rerun per day — repeated same-day crawls escalate Cloudflare-style walls.
 
-**Cron:** `scout-competitor-tracker-weekly` — Monday 10:30 AM Manila (30 min after CFNCS's own
-`competitor-tracker-weekly` — avoids same-minute overlap, not a hard requirement), `--command`
-(no model session, $0 tokens). Self-delivers its own Discord report (`--no-deliver` on the cron
-job — delivery.mode stays script-owned, mirroring the original's reasoning: cron run status
-should reflect the script's real success/failure, not delivery plumbing). On failure, the cron
-job's native `--failure-alert-*` config DMs Chris on Telegram (riding the existing Palantir
-Telegram account for that one outbound alert — no Telegram credential of Scout's own).
+## Weekly batches (added 2026-07-21)
+
+The weekly run is **split into two staggered cron jobs**, not one — at 13 competitors (two of them
+14k–19k-product monsters: HausOfMode, CristalliSchwiiz) a single sequential run grew to ~2 h,
+outgrowing any safe timeout. Each batch is the same `index.js`/`lib.js`/`.run.lock` machinery,
+selected by a per-competitor `"batch"` field in `config.json` via `--group`:
+
+- **Batch A** — job `34357ef3-…`, **Mon 10:30 Manila**, `--group A --wait-for-lock 600`, timeout
+  5400s. CristalliSchwiiz (the ~1 h monster, `maxRankPages:2000`), ByEmiliaRose, Gartenort,
+  DriftAndTide, NouveauRiche.
+- **Batch B** — job `05acdb9e-…`, **Mon 12:00 Manila** (90 min after A), `--group B
+  --include-ungrouped --wait-for-lock 1800`, timeout 4200s. HausOfMode, Feanatic, BelroShop,
+  LozendaFashion, RisoraShop, BreuerMode, JenniferJohnCharleston, Drune.
+
+Design notes:
+- **Each batch self-delivers its own Discord report** (header shows "Batch A"/"Batch B") — the team
+  sees two messages Monday. Simpler than coordinating one combined report across two jobs.
+- **`--include-ungrouped`** on Batch B is a safety net: any enabled competitor with no `batch` (e.g.
+  a hand-edited config) is still scraped by B, never silently skipped. `competitors.js --add` also
+  auto-tags new competitors `batch:"B"`.
+- **`--wait-for-lock N`**: if a batch starts while another run holds `.run.lock`, it waits up to N
+  seconds (polling) instead of failing — so a slightly-overrunning Batch A doesn't make Batch B
+  exit 3. Manual/ad-hoc runs (no flag) still fail fast on a live lock.
+- **BelroShop is in Batch B (12:00)**, clear of CFNCS/Palantir's own Belro scrape at 10:00 — no
+  same-domain double-hit from the shared VPS.
+- Both jobs are `--no-deliver` (delivery.mode `none`, script-owned) with the same
+  `--failure-alert-*` config DMing Chris on Telegram (riding the Palantir account). `$0` model tokens.
+- **To rebalance batches:** edit the `"batch"` field per competitor in `config.json` (A/B). To add a
+  third batch, register another cron job with `--group C` and a later stagger.
 
 ## Data source — IMPORTANT (inherited from Phase 1 findings on the CFNCS tracker)
 

@@ -172,7 +172,7 @@ function makeJunkMatcher(patterns) {
   return h => res.some(re => re.test(h));
 }
 
-// Returns { ok, blocked, partial, handles:[...rank order], pages, error }
+// Returns { ok, blocked, partial, capped, cap, handles:[...rank order], pages, error }
 //
 // `blocked` = no usable data at all (page 1 itself failed, or an explicit 403/409/401/430).
 // `partial` = real data was collected, but a page past page 1 hit a persistent 429/5xx/network
@@ -180,6 +180,12 @@ function makeJunkMatcher(patterns) {
 // signaling a clean end of pagination (a concrete status like 404, or a 200 with an empty grid).
 // Conflating these two was the original bug: a mid-crawl wall silently looked identical to
 // "reached the last page," so a blocked/partial crawl was reported as a complete one.
+// `capped` = the crawl ran out of its page budget (`page > cap`) while the last page was STILL
+// yielding new products — i.e. the store genuinely has more ranked products than `cap` pages can
+// reach. Deterministic (unlike `partial`), and the catalog fetch is independent/complete, so it's
+// distinct from both: real, stable top-N rank data, just not full coverage. Fix per-store by
+// setting `maxRankPages` high enough; the flag exists so an oversized store is reported honestly
+// ("capped at page N") instead of silently passing as a complete week or blamed on the store.
 export async function scrapeBestsellerRanks(competitor, cfg) {
   const base = competitor.baseUrl.replace(/\/+$/, '');
   const col  = competitor.collection || 'all';
@@ -188,7 +194,7 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
 
   const seen = new Set();
   const ranked = [];
-  let page = 1, blocked = false, partial = false, error = null, emptyOrDupPages = 0;
+  let page = 1, blocked = false, partial = false, capped = false, error = null, emptyOrDupPages = 0;
 
   while (page <= cap) {
     const url = `${base}/collections/${col}?sort_by=best-selling&page=${page}`;
@@ -226,7 +232,15 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
     page++;
     if (page % 25 === 0) console.error(`    [${competitor.name}] rank scrape page ${page}, ${ranked.length} ranked so far...`);
   }
-  return { ok: ranked.length > 0 && !blocked, blocked, partial, handles: ranked, pages: page - 1, error };
+  // Exited via the `while (page <= cap)` condition rather than any break above — the only way
+  // `page` exceeds `cap` is a productive final page (an empty/duplicate page breaks first, with
+  // `page` unincremented). So this is unambiguously "cut off by the page budget while still
+  // finding products," not a clean end.
+  if (!blocked && !partial && page > cap) {
+    capped = true;
+    error = `rank scrape hit the ${cap}-page cap while still finding new products — coverage incomplete (raise this store's maxRankPages)`;
+  }
+  return { ok: ranked.length > 0 && !blocked, blocked, partial, capped, cap, handles: ranked, pages: page - 1, error };
 }
 
 // ─── fast tier detection (page-1 only) — for add-time checks ───────────────────
@@ -270,6 +284,8 @@ export async function buildSnapshot(competitor, cfg, date) {
     tier: null,
     blocked: false,
     partial: false,
+    capped: false,
+    cappedAt: null,
     error: null,
     catalogCount: 0,
     rankedCount: 0,
@@ -333,6 +349,15 @@ export async function buildSnapshot(competitor, cfg, date) {
     out.partial = true;
     out.tier += ' — PARTIAL (incomplete crawl)';
     out.error = partialNotes.join(' | ');
+  } else if (ranks.capped) {
+    // Ran the full page budget and the last page was still productive — real, stable top-N rank
+    // data, but not full coverage. Unlike `partial`, the catalog fetch here is complete and the
+    // cut-off is deterministic, so this IS saved as the baseline (see index.js) — just flagged so
+    // the report says "capped at page N", never mislabeled as a clean week or blamed on the store.
+    out.capped = true;
+    out.cappedAt = ranks.cap;
+    out.tier += ` — CAPPED (rank scrape stopped at the ${ranks.cap}-page cap)`;
+    out.error = ranks.error;
   } else if (!ranks.ok && catalog.ok) {
     out.error = `rank scrape failed: ${ranks.error || 'no ranks'}`;
   }
