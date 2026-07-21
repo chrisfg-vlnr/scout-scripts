@@ -390,3 +390,50 @@ only, never credential values. Append, don't rewrite.)*
   confirmation later; if he hadn't, it simply would never have been added despite Scout's stated
   plan. Proposed AGENTS.md language drafted (a new "never imply follow-through you can't
   guarantee" section) but **not applied** — for Chris and the build-partner to review/edit first.
+
+**2026-07-21 (later) — Implemented four decided fixes: capped coverage, follow-through rules, Palantir port, staggered batches:**
+- **CristalliSchwiiz page-cap coverage (P1):** its 2026-07-21 baseline had come back 50% (9,596/19,183
+  ranked) because the rank scrape silently hit the global 800-page `maxPagesSafety` cap while still
+  finding products. Fix: `lib.js scrapeBestsellerRanks()` now returns a distinct `capped` flag (loop
+  exhausted its page budget with the last page still productive — separate from `blocked`, `partial`,
+  and a clean natural end); `buildSnapshot()` adds a `— CAPPED (…)` tier suffix; the Discord/Sheet
+  report now says "hit the N-page cap … raise this store's page cap" instead of the misleading "store
+  may hide products from HTML." A capped snapshot **is** saved as baseline (unlike partial — the
+  catalog fetch is complete, so no removed/new mislabeling risk; the data is real, deterministic
+  top-N). Set `CristalliSchwiiz.maxRankPages = 2000` (sized from real density ~12 ranked/page →
+  ~1,599 pages for full coverage + ~25% margin). **Recaptured & verified: 19,179/19,183 = 99.98%,
+  natural-end at ~1,600 pages, `capped:false`, Sheet 19,185 rows.** Capped-vs-natural-end logic also
+  unit-tested with a fetch mock.
+- **Investigation C follow-through rules (P2):** `AGENTS.md` §2b (two literal, non-judgment rules):
+  (a) exactly one completion-or-failure message per add/baseline started — no exceptions; (b) never
+  imply follow-through beyond the current turn (no heartbeat, no persistent queue). Both trace to the
+  2026-07-20/21 add incidents (RisoraShop/DriftAndTide finished silently; "I'll do risora →
+  driftandtide in order" left driftandtide unadded 6.5 h).
+- **Palantir port (P3, read+backup+diff-verify, committed in palantir-scripts):** ported the four
+  zero-behavior-change guards to `~/scripts/competitor-tracker/` — unknown-flag hard-fail + `--help`,
+  `.run.lock` concurrency guard, `fetchCatalog()` dup-page break; cron `timeoutSeconds` 2400→3600
+  (sized to Palantir's real ~26–28 min runs, NOT copied from Scout — Palantir has no 14k–19k monster
+  stores). Verified on one small competitor with no production side effects (no Telegram/Sheet post).
+  Telegram token left untouched (known pre-existing issue, out of scope). `driftandtide.com` noted in
+  both trackers' docs as an intentional Palantir/Scout overlap (Chris-confirmed), not a mix-up.
+- **Staggered weekly batches (P4):** at 13 competitors a single run is ~2 h (CristalliSchwiiz alone is
+  ~60 min at 2,000 pages). Split into two cron jobs by a per-competitor `batch` field via `--group`:
+  **Batch A** (job `34357ef3-…`, Mon 10:30 Manila, 5400s) = CristalliSchwiiz, ByEmiliaRose, Gartenort,
+  DriftAndTide, NouveauRiche; **Batch B** (job `05acdb9e-…`, Mon 12:00 Manila, 5400s) = HausOfMode,
+  Feanatic, BelroShop, LozendaFashion, RisoraShop, BreuerMode, JenniferJohnCharleston, Drune. New
+  flags: `--group`, `--include-ungrouped` (Batch B catch-all so a new competitor is never silently
+  skipped; `competitors.js --add` also auto-tags `batch:"B"`), `--wait-for-lock N` (a slightly-
+  overrunning batch waits rather than exit-3; manual runs still fail fast — tested both ways against
+  a live lock). Each batch self-delivers its own "Batch A/B" Discord report (delivery `none`, matching
+  failure-alerts). BelroShop is in Batch B (12:00), clear of Palantir's Belro scrape at 10:00.
+  **Verified Batch B end-to-end through the real registered cron job: status ok, 61.2 min, all 8
+  attempted (7 clean + Drune blocked-genuine), Discord report delivered.**
+- **Runtime note / open watch-item:** Batch B's real measured runtime was **~61 min** (higher than the
+  ~48 min estimate — mid-size stores at 1–2 s/page add up). Its timeout was bumped 4200→**5400s** to
+  match Batch A after this measurement (~29 min margin). If Batch B's list grows, rebalance a store to
+  Batch A or add a Batch C rather than just raising the timeout again.
+- **Minor pre-existing data-quality note (not fixed, out of scope):** CristalliSchwiiz's #1/#2
+  "best-sellers" are protection/insurance upsells ("Pakket Bescherming", "Sicherheitspaket") that
+  slip past `junkHandlePatterns` because those patterns are English-only and this store uses
+  Dutch/German handles. Affects any non-English store's top ranks cosmetically — worth a follow-up if
+  Chris wants localized junk patterns.
