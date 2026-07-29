@@ -69,13 +69,34 @@ function jitter(cfg) {
   return Math.floor(minDelayMs + Math.random() * Math.max(0, maxDelayMs - minDelayMs));
 }
 
+// Cap on how long a single Retry-After-honoring wait is allowed to be — an untrusted external
+// header should never be honored unbounded. Value ported from Palantir's 2026-07-28 fix (chosen
+// there from 10+ live probes observing Shopify consistently send `Retry-After: 60` on
+// `local_rate_limited`; this cap gives 2x headroom above that observed value).
+const MAX_RETRY_AFTER_SECONDS = 120;
+
 // Sequential, paced fetch. Sleeps a randomized 1–2s BEFORE every request so callers
 // looping over pages stay polite automatically. Retries transient errors (429/5xx/network).
+//
+// Retry-After handling ported 2026-07-29 from Palantir's politeFetchOnce() (2026-07-28 fix),
+// after Scout's own schema-check fetches hit this exact wall this session (see primer's
+// 2026-07-29 Execution Log). SCOPE NOTE — this is deliberately NARROWER than what Palantir's
+// code actually does: Palantir honors Retry-After on ANY 429 or 5xx that carries the header;
+// `isShopifyRateLimit` there only changes the log message, not whether the wait is honored. This
+// port only honors Retry-After when the response is specifically a 429 whose body contains
+// `local_rate_limited` (Shopify's own rate-limit signature) — a 429 without that body, or any
+// 5xx, falls through to the existing fixed backoff unchanged. Deliberate, per explicit scoping
+// for this port, not an oversight — flagged so this doesn't get "fixed" to match Palantir later
+// without that being a conscious choice. Redirect pacing and the consecutive-page-end change from
+// the same Palantir fix set are explicitly NOT ported here — see the primer for that scoping.
 export async function politeFetch(url, cfg, { accept = 'text/html' } = {}) {
   const { timeoutMs, maxRetries, userAgent } = cfg.fetch;
   let lastErr = null;
+  let nextWaitMs = null; // set by a local_rate_limited 429's Retry-After; overrides the default backoff once
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    await sleep(jitter(cfg) + (attempt > 0 ? attempt * 1500 : 0)); // base pacing + backoff on retry
+    const baseWait = jitter(cfg) + (attempt > 0 ? attempt * 1500 : 0); // base pacing + backoff on retry
+    await sleep(nextWaitMs != null ? Math.max(baseWait, nextWaitMs) : baseWait);
+    nextWaitMs = null;
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
@@ -90,7 +111,25 @@ export async function politeFetch(url, cfg, { accept = 'text/html' } = {}) {
       });
       clearTimeout(t);
       if (res.status === 429 || res.status >= 500) {
-        lastErr = `HTTP ${res.status}`;
+        // Body read (needed to detect local_rate_limited) only on 429 — a 5xx can never match,
+        // so skip the extra await there. Palantir's version reads the body unconditionally; this
+        // is a minor, behavior-equivalent tightening, not a functional difference.
+        let bodySnippet = '';
+        if (res.status === 429) {
+          try { bodySnippet = (await res.text()).slice(0, 60); } catch { /* body already consumed/unreadable — cosmetic only */ }
+        }
+        const isShopifyRateLimit = res.status === 429 && bodySnippet.includes('local_rate_limited');
+        if (isShopifyRateLimit) {
+          const retryAfterHeader = res.headers.get('retry-after');
+          const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : null;
+          lastErr = `Shopify local_rate_limited (Retry-After ${retryAfterSec ?? 'n/a'}s)`;
+          if (retryAfterSec && retryAfterSec > 0 && attempt < maxRetries) {
+            nextWaitMs = Math.min(retryAfterSec, MAX_RETRY_AFTER_SECONDS) * 1000;
+            console.error(`    [rate-limit] ${lastErr} — waiting ${Math.round(nextWaitMs / 1000)}s before retry ${attempt + 2}/${maxRetries + 1}...`);
+          }
+        } else {
+          lastErr = `HTTP ${res.status}`;
+        }
         continue; // retry
       }
       const text = await res.text();
@@ -99,6 +138,9 @@ export async function politeFetch(url, cfg, { accept = 'text/html' } = {}) {
       clearTimeout(t);
       lastErr = e.name === 'AbortError' ? 'timeout' : e.message;
     }
+  }
+  if (lastErr && lastErr.startsWith('Shopify local_rate_limited')) {
+    console.error(`    [rate-limit] retries exhausted after honoring Retry-After — giving up on this page.`);
   }
   return { status: null, ok: false, ctype: '', text: '', error: lastErr };
 }

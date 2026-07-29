@@ -276,6 +276,17 @@ repo that `~/scripts/competitor-tracker/` lives in — matching the pattern alre
 
 ## Fallback tiers
 
+**Before a page ever counts toward Blocked/Partial below (added 2026-07-29):** `politeFetch()` in
+`lib.js` now honors a `Retry-After` header (capped at 120s) when a 429's body says
+`local_rate_limited` — Shopify's own rate-limit signature — waiting that long before the next
+retry instead of the normal short backoff. Ported from Palantir after Scout's own fetches hit
+this wall live; deliberately narrower than Palantir's version (which honors Retry-After on any
+429/5xx, not just this specific signature) — see the Primer's Execution Log for the exact scoping
+and a flagged, unresolved risk: honoring this can add up to ~360s per page in the worst case,
+which the Primer entry shows could threaten Batch B's timeout margin if multiple competitors hit
+it independently on the same run. If a batch times out or gets SIGTERM'd, check the console for
+`[rate-limit]` lines first.
+
 1. JSON catalog + HTML rank (normal).
 2. HTML rank only / catalog only (degraded — logged).
 3. **Blocked** (e.g. Cloudflare 403/409/429 on page 1 — no usable data at all): never crashes the

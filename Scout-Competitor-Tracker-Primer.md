@@ -621,3 +621,52 @@ real Sheet-erasure bug found while building it:**
   section, Google Sheet/Config/Ad-hoc-queries sections touched).
 - Full diff shown to Chris and approved before any file was written, per this session's working
   agreement for multi-file changes with room for interpretation.
+
+**2026-07-29 (same session, separate commit) — Shipped: Retry-After honoring in politeFetch(),
+ported from Palantir with real batch-budget risk flagged, not silently accepted:**
+- **What shipped:** `politeFetch()` in `lib.js` now honors a `Retry-After` header (capped at
+  `MAX_RETRY_AFTER_SECONDS = 120`) when a 429 response's body contains `local_rate_limited` —
+  waits that duration before the next retry instead of the fixed `jitter + attempt*1500ms`
+  backoff. Ported after Scout's own schema-check fetches hit this exact wall earlier the same
+  session (see the throttle-finding entry above).
+- **Deliberately NARROWER than Palantir's actual shipped code, flagged explicitly:** Palantir's
+  `politeFetchOnce()` honors Retry-After on **any** 429 or 5xx carrying the header — its
+  `isShopifyRateLimit` check only changes the log message, not whether the wait is honored. This
+  port only honors it when the response is specifically a 429 whose body contains
+  `local_rate_limited`; any other 429, or any 5xx, falls through to the existing backoff
+  unchanged. This was Chris's explicit scoping (matches the verify requirements given), not a
+  byte-for-byte port — recorded so it isn't "corrected" to match Palantir later without that being
+  a conscious decision. Redirect pacing and the consecutive-page-end change from Palantir's same
+  2026-07-28 fix set were explicitly NOT ported — separate decision, out of scope here.
+- **Verification (no live runs):** 17 assertions via a synthetic fetch-mock harness with
+  `setTimeout` intercepted (records the requested wait duration, fires near-instantly) so the
+  120s-cap test didn't cost 2 real minutes — 60s Retry-After honored then succeeds; 999s capped to
+  exactly 120000ms (999000ms literally never requested); no-header and non-`local_rate_limited`
+  429s fall back to normal backoff unchanged (proves the body-gate actually gates, not just header
+  presence); 5xx completely unaffected; normal 200-on-first-try untouched; a persistent throttle
+  that never clears gives up cleanly (no hang/throw) after exhausting retries.
+- **The number that mattered — worst-case runtime, measured not asserted:** worst-case wait for
+  ONE page, fully exhausted, with Scout's real `maxRetries: 3` = **360,013ms (~360s / 6 min)**,
+  read directly off the harness, not hand-computed. Structurally (confirmed by re-reading
+  `scrapeBestsellerRanks()`/`fetchCatalog()`), a wall on any page breaks that whole page-loop
+  immediately — never retries page-by-page — so worst case per **competitor** is bounded by at
+  most two such exhaustions (catalog fetch + rank scrape), independently.
+- **Batch-budget risk (Chris's actual ask) — flagged, not waved away:** applied to measured batch
+  margins (Batch A ~1560s margin, Batch B ~1728s margin, from the 2026-07-21 entries above):
+  - Realistic case (one honored wait clears each wall, ~120–240s/competitor if independently
+    affected): Batch A +1200s (fits, ~360s headroom left); **Batch B +1920s — exceeds its 1728s
+    margin by ~192s.**
+  - Worst theoretical case (throttle never clears despite 3 honored waits, 720s/competitor):
+    both batches blow their budgets outright.
+  - Two open unknowns, not resolved: whether a normal 7-day cadence even provokes this throttle
+    (today's hits were on domains touched only ~48–52h prior, off the normal rhythm — no evidence
+    a full week's gap doesn't clear it entirely), and whether the throttle is per-domain or
+    genuinely shared/IP-wide across a whole batch run.
+- **Decision: Chris chose to ship as-is and accept the risk** (2026-07-29, after being shown the
+  numbers above) — upside of recovering real data judged to outweigh the SIGTERM risk; explicitly
+  not resolved by raising a cron timeout or adding a cumulative-wait ceiling this session. **If
+  Monday's Batch B (or A) times out or gets SIGTERM'd, check this entry first** — the
+  `[rate-limit]` console lines this change adds will show whether Retry-After honoring was the
+  cause.
+- **Files changed:** `lib.js` only (`politeFetch()`), separate commit from the Price/Currency
+  work per Chris's explicit instruction — nothing else touched.
