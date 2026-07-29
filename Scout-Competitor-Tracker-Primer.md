@@ -670,3 +670,64 @@ ported from Palantir with real batch-budget risk flagged, not silently accepted:
   cause.
 - **Files changed:** `lib.js` only (`politeFetch()`), separate commit from the Price/Currency
   work per Chris's explicit instruction — nothing else touched.
+
+**2026-07-29 (same session, follow-up) — Raised Batch A/B cron timeouts 5400s → 7200s; SUPERSEDES
+the "risk accepted" line above — the risk is now mitigated, not just logged:**
+- **Change:** `openclaw cron edit` on both jobs, `--timeout-seconds 7200` only. Per-job payload
+  field only — `noOutputTimeoutSeconds` (1200 on both) and every other field left untouched.
+  Nothing global changed. `openclaw doctor --fix` was explicitly NOT run (it's known to revert
+  cron config — a warning about it appears in `openclaw cron --help`'s own footer).
+  - Batch A (`34357ef3-…`): `timeoutSeconds` 5400 → **7200**.
+  - Batch B (`05acdb9e-…`): `timeoutSeconds` 5400 → **7200**.
+- **Verified via a separate, freshly-issued `openclaw cron get` per job** (not the edit command's
+  own output) — both confirmed `timeoutSeconds: 7200`, `noOutputTimeoutSeconds: 1200` unchanged,
+  `updatedAtMs` timestamps within seconds of the edit. Note: `openclaw cron list`'s table doesn't
+  expose `timeoutSeconds` as a column, so `cron get` was the actual persistence check, not `list`.
+- **Reasoning (Chris's call):** Batch B's ~1728s margin was already smaller than the ~1920s
+  realistic-case Retry-After cost computed in the entry above — genuinely exposed. Batch A's
+  remaining ~360s (6 min) headroom was judged too thin for comfort even though its realistic-case
+  math looked survivable. Raised both symmetrically so neither needs revisiting Monday.
+- **New evidence surfaced while pulling before/after state, directly relevant to the "two open
+  unknowns" flagged in the entry above:** `openclaw cron get` on both jobs' `state.lastDiagnostics`
+  showed their **actual** 2026-07-27 (last Monday) run results, not just the healthy-runtime
+  estimates cited earlier:
+  - **Batch A's real 07-27 run:** 4 of 5 competitors came back HTTP 429 or 500 (NouveauRiche
+    BLOCKED: catalog 429/html 500; ByEmiliaRose PARTIAL: wall at page 2, catalog 429; CristalliSchwiiz
+    BLOCKED: catalog+html both 429; DriftAndTide BLOCKED: catalog+html both 429). Only Gartenort came
+    back clean. `lastDurationMs: 378106` (~6.3 min) — fast specifically *because* most competitors
+    failed quickly rather than running their normal full crawl.
+  - **Batch B's real 07-27 run:** mostly clean — Feanatic, BelroShop, HausOfMode, LozendaFashion,
+    JenniferJohnCharleston, BreuerMode all Tier 1+2 with real data; only Drune blocked (HTTP 500/500 —
+    its known, pre-existing, non-throttle block). `lastDurationMs: 3804149` (~63.4 min, close to but
+    slightly above the previously-cited ~61.2 min figure).
+  - **This answers one of the two open unknowns directly: yes, a normal 7-day cadence already
+    provoked widespread 429s on Batch A's real last run** — not confirmed as literally carrying the
+    `local_rate_limited` body signature (the diagnostics summary only shows HTTP status, not response
+    bodies), but the volume (4/5 competitors, mixed 429/500) is consistent with the same class of
+    problem investigated earlier this session. The second unknown (per-domain vs. shared/IP-wide)
+    remains genuinely open — Batch A's heavy hit vs. Batch B's mostly-clean run 90 minutes later is
+    *some* evidence against a simple "IP is globally hot all day" model, but isn't conclusive either
+    way with one data point per batch.
+  - Not investigated further this session (out of scope for a timeout-raise task) — flagged for
+    whoever reviews Monday's actual run, or a future dedicated investigation.
+- **Docs check on Chris's question (does `timeoutSeconds` interact with the gateway's
+  restart-defer window?):** checked `docs.openclaw.ai/automation/cron-jobs` and
+  `docs.openclaw.ai/gateway/restart-recovery` directly (both fetched successfully, real body
+  content, not just a title — a passing check per the suggestion rule).
+  - **Confirmed, not inferred:** `timeoutSeconds` is documented as a job's own per-run wall-clock
+    budget (`automation/cron-jobs`: "Per-run wall-clock budget: `--timeout-seconds` when set...").
+    Separately, `gateway/restart-recovery` documents a graceful-restart **drain budget (5 minutes by
+    default)** for in-flight work during a requested restart/config-change/upgrade — described as a
+    single fixed default, with no text anywhere connecting its duration to any job's `timeoutSeconds`
+    value. These read as two structurally independent mechanisms: one bounds how long the job may
+    run before the gateway kills it; the other bounds how long the gateway waits before restarting
+    itself for unrelated reasons. **No interaction found — matches Chris's own expectation.**
+  - **UNVERIFIED, flagged rather than asserted:** the docs describe a 5-minute drain budget, but
+    the primer's own 2026-07-21 investigation empirically observed a **~2-minute** defer (re-checking
+    every 30s, then a SIGUSR1 restart) specifically for the auth-config-reload-triggered restarts
+    that hit Batch A/B that week. The docs don't explicitly state whether that's the same mechanism
+    described here (config-reload restarts might be a narrower/faster code path than the general
+    "requested restart" this page documents) or a different one. Not resolved this session — the
+    core question Chris asked (does raising `timeoutSeconds` change this window) is answered no
+    either way, since nothing ties the drain duration to job config in either description.
+- **Not touched:** `noOutputTimeoutSeconds`, any global config, `openclaw doctor --fix`.
