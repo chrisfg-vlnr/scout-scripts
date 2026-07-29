@@ -105,7 +105,22 @@ export async function politeFetch(url, cfg, { accept = 'text/html' } = {}) {
 
 // ─── JSON catalog (full product list + metadata; NOT a sales rank) ─────────────
 
-// Returns { ok, blocked, products:[{handle,title,productType,id,url}], error }
+// Price selection strategy: first variant's price (Chris's call, 2026-07-29 — chosen for
+// simplicity over min-across-variants, knowing it can be arbitrary if variant order isn't
+// meaningful). Isolated here so switching strategies later (e.g. Math.min across
+// product.variants) is a one-line change at this function, not a re-plumb through
+// fetchCatalog/buildSnapshot/computeMetrics. UNVERIFIED-THIS-SESSION: the assumption that
+// variants[0].price is a numeric string comes from Shopify's documented public products.json
+// contract, not a live-confirmed payload — the 2026-07-29 schema-check fetch was blocked
+// (local_rate_limited) on both attempted stores; see the primer's Execution Log.
+function selectPrice(product) {
+  const v = Array.isArray(product.variants) ? product.variants[0] : null;
+  if (!v || v.price == null) return null;
+  const n = Number(v.price);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Returns { ok, blocked, products:[{handle,title,productType,id,url,price}], error }
 export async function fetchCatalog(competitor, cfg) {
   const base = competitor.baseUrl.replace(/\/+$/, '');
   const col  = competitor.collection || 'all';
@@ -133,6 +148,7 @@ export async function fetchCatalog(competitor, cfg) {
         productType: p.product_type || '',
         id: p.id ?? null,
         url: `${base}/products/${p.handle}`,
+        price: selectPrice(p),
       });
     }
     // A page that adds no NEW handles means the server is repeating itself (some hosts
@@ -275,7 +291,9 @@ export async function detectTier(competitor, cfg) {
 
 // Snapshot shape:
 // { competitor, domain, date, tier, blocked, error, catalogCount, rankedCount, coverage,
-//   products: [ { handle, title, productType, url, rank } ] }   // rank: 1..N or null (unranked)
+//   products: [ { handle, title, productType, url, rank, price } ] }
+//   // rank: 1..N or null (unranked); price: first-variant number or null (rank-only/Tier-2
+//   // synthesized entries, and any entry Shopify didn't send a parseable price for)
 export async function buildSnapshot(competitor, cfg, date) {
   const out = {
     competitor: competitor.name,
@@ -320,6 +338,10 @@ export async function buildSnapshot(competitor, cfg, date) {
         productType: '',
         id: null,
         url: `${competitor.baseUrl.replace(/\/+$/, '')}/products/${h}`,
+        // Rank-only synthesized entry — HTML grid scraping has no price data at all
+        // (extractGridHandles() is a bare href regex), so this is permanently null for
+        // Tier-2-only competitors, not just missing-for-now.
+        price: null,
       });
     }
   }
@@ -330,6 +352,7 @@ export async function buildSnapshot(competitor, cfg, date) {
     productType: p.productType,
     url: p.url,
     rank: rankMap.has(p.handle) ? rankMap.get(p.handle) : null,
+    price: p.price ?? null,
   }));
 
   out.catalogCount = catalog.products.length;
@@ -415,6 +438,11 @@ export function computeMetrics(snaps, cfg = {}) {
   const win = snaps.slice(0, cfg.weeksToKeep ?? 4); // [s0=this, s1=last, s2, s3]
   const s0 = win[0];
   const hasPrior = win.length > 1;
+
+  // Currency is a manually-set per-competitor config value (config.json), not derived from any
+  // fetch — look it up once here by the snapshot's competitor name. null until Chris fills it in
+  // (see config.json's `currency` field); every row below carries the same value.
+  const currency = (cfg.competitors && s0) ? (findCompetitor(cfg, s0.competitor)?.currency ?? null) : null;
 
   // rank lookups per snapshot
   const rankMaps = win.map(s => {
@@ -511,6 +539,8 @@ export function computeMetrics(snaps, cfg = {}) {
       monthChange, streak,
       avgRank: avgRank != null ? Math.round(avgRank * 10) / 10 : null,
       hotStreak, spike, consistentTop10,
+      price: num(meta.price),
+      currency,
     });
   }
 
@@ -558,8 +588,27 @@ export const SHEET_HEADER = [
   'Last Week Rank', 'This Week Rank', 'WoW Change', 'Status', 'Last Updated',
   'Wk -3 Rank', 'Wk -2 Rank', 'Month Change', 'Streak', 'Avg Rank (4w)',
   'Hot Streak', 'Spike', 'Consistent Top 10',
+  // Appended 2026-07-29, deliberately at the END, not inserted mid-row: wowSortKey() and
+  // writeCompetitorTab()'s sort index into row arrays by hardcoded position (a[6], a[5]) —
+  // appending leaves every existing index untouched. Currency is a manually-set config value
+  // (config.json), not derived/converted — shown as-is, blank until Chris fills it in.
+  'Price', 'Currency',
 ];
 const SHEET_NCOL = SHEET_HEADER.length;
+
+// 1-based column index -> A1 letter(s) (1->A, 26->Z, 27->AA, ...).
+function colLetter(n) {
+  let s = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+// Last column letter of the current schema, DERIVED from SHEET_NCOL — see writeCompetitorTab()
+// for why this must never be a hardcoded literal again.
+const SHEET_LAST_COL = colLetter(SHEET_NCOL);
 
 export async function getSheetsClient() {
   const sa = JSON.parse(await fs.readFile(GOOGLE_SA_PATH, 'utf8'));
@@ -592,6 +641,7 @@ function rowFromMetric(r, today) {
     rankCell(r.lastRank), rankCell(r.thisRank), rankCell(r.wow), r.status, today,
     rankCell(r.wk3Rank), rankCell(r.wk2Rank), rankCell(r.monthChange), rankCell(r.streak),
     rankCell(r.avgRank), boolCell(r.hotStreak), boolCell(r.spike), boolCell(r.consistentTop10),
+    rankCell(r.price), r.currency || '',
   ];
 }
 
@@ -611,9 +661,20 @@ export async function writeCompetitorTab(sheets, sheetId, tabName, rows, today) 
   const tabSheetId = await getOrCreateSheetTabId(sheets, sheetId, tabName);
 
   // existing rows (preserve history — never delete)
+  //
+  // Read range's end column is DERIVED from SHEET_NCOL (via SHEET_LAST_COL), not a hardcoded
+  // literal. Found 2026-07-29 while adding the Price/Currency columns: this used to be a bare
+  // 'A2:Q' (17 cols), decoupled from SHEET_HEADER.length. Any row NOT touched by the current
+  // week's computeMetrics() output (e.g. a product removed 2+ weeks ago, preserved only via the
+  // padRow() path below) would be read back one-or-more columns short the moment SHEET_HEADER
+  // grew past column Q; padRow() would pad the missing trailing cell(s) with '', and the next
+  // full-tab clear-and-rewrite would write that blank over whatever real value the sheet already
+  // had — silently ERASING it, not just leaving it blank for a row that never had it. Deriving
+  // the range from SHEET_NCOL makes this class of bug structurally impossible on the next column
+  // addition, instead of relying on remembering to bump a literal every time.
   let existing = [];
   try {
-    const res = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: `'${tabName}'!A2:Q` });
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: `'${tabName}'!A2:${SHEET_LAST_COL}` });
     existing = res.data.values ?? [];
   } catch { existing = []; }
 

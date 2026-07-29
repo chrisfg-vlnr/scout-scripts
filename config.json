@@ -27,19 +27,20 @@
     "donation"
   ],
   "competitors": [
-    {"name":"NouveauRiche","baseUrl":"https://nouveauriche-official.com","collection":"all","enabled":true,"batch":"A"},
-    {"name":"ByEmiliaRose","baseUrl":"https://byemiliarose.com","collection":"all","enabled":true,"batch":"A"},
-    {"name":"Feanatic","baseUrl":"https://feanatic.com","collection":"all","enabled":true,"batch":"B"},
-    {"name":"BelroShop","baseUrl":"https://belroshop.com","collection":"all","enabled":true,"batch":"B"},
-    {"name":"HausOfMode","baseUrl":"https://hausofmode.de","collection":"all","enabled":true,"batch":"B"},
-    {"name":"Drune","baseUrl":"https://drune.de","collection":"all","enabled":true,"batch":"B"},
-    {"name":"LozendaFashion","baseUrl":"https://lozendafashion.com","collection":"all","enabled":true,"batch":"B"},
-    {"name":"Gartenort","baseUrl":"https://gartenort.de","collection":"all","enabled":true,"batch":"A"},
-    {"name":"CristalliSchwiiz","baseUrl":"https://crystalli-schwiiz.com","collection":"all","enabled":true,"maxRankPages":2000,"batch":"A"},
-    {"name":"JenniferJohnCharleston","baseUrl":"https://jenniferjohn-charleston.com","collection":"all","enabled":true,"batch":"B"},
-    {"name":"BreuerMode","baseUrl":"https://breuermode.de","collection":"all","enabled":true,"batch":"B"},
-    {"name":"RisoraShop","baseUrl":"https://risora-shop.de","collection":"all","enabled":true,"batch":"B"},
-    {"name":"DriftAndTide","baseUrl":"https://www.driftandtide.com","collection":"all","enabled":true,"batch":"A"}
+    {"name":"NouveauRiche","baseUrl":"https://nouveauriche-official.com","collection":"all","enabled":true,"batch":"A","currency":null},
+    {"name":"ByEmiliaRose","baseUrl":"https://byemiliarose.com","collection":"all","enabled":true,"batch":"A","currency":null},
+    {"name":"Feanatic","baseUrl":"https://feanatic.com","collection":"all","enabled":true,"batch":"B","currency":null},
+    {"name":"BelroShop","baseUrl":"https://belroshop.com","collection":"all","enabled":true,"batch":"B","currency":null},
+    {"name":"HausOfMode","baseUrl":"https://hausofmode.de","collection":"all","enabled":true,"batch":"B","currency":null},
+    {"name":"Drune","baseUrl":"https://drune.de","collection":"all","enabled":true,"batch":"B","currency":null},
+    {"name":"LozendaFashion","baseUrl":"https://lozendafashion.com","collection":"all","enabled":true,"batch":"B","currency":null},
+    {"name":"Gartenort","baseUrl":"https://gartenort.de","collection":"all","enabled":true,"batch":"A","currency":null},
+    {"name":"CristalliSchwiiz","baseUrl":"https://crystalli-schwiiz.com","collection":"all","enabled":true,"maxRankPages":2000,"batch":"A","currency":null},
+    {"name":"JenniferJohnCharleston","baseUrl":"https://jenniferjohn-charleston.com","collection":"all","enabled":true,"batch":"B","currency":null},
+    {"name":"BreuerMode","baseUrl":"https://breuermode.de","collection":"all","enabled":true,"batch":"B","currency":null},
+    {"name":"RisoraShop","baseUrl":"https://risora-shop.de","collection":"all","enabled":true,"batch":"B","currency":null},
+    {"name":"DriftAndTide","baseUrl":"https://www.driftandtide.com","collection":"all","enabled":true,"batch":"A","currency":null},
+    {"name":"RedlichBecker","baseUrl":"https://redlich-becker.de","collection":"all","enabled":true,"batch":"B","currency":null}
   ],
-  "lastAddAtMs": 1784596812594
+  "lastAddAtMs": 1784917815485
 }

@@ -266,6 +266,9 @@ async function run(args) {
         const label = snapshot.blocked ? 'BLOCKED' : 'PARTIAL';
         console.log(`  ${label} — flagged in report${sheets ? ' + Sheet marker' : ''} (snapshot not saved).`);
         if (sheets) {
+          // price: always null — a marker row has no product data, real or otherwise.
+          // currency: a config value, not fetch-dependent, so it's populated here whenever
+          // it's known regardless of the failed run (see D2 in the 2026-07-29 primer entry).
           const marker = snapshot.blocked ? {
             handle: '__blocked__',
             title: '⚠️ BLOCKED — no data this week (manual check recommended)',
@@ -274,6 +277,7 @@ async function run(args) {
             status: 'Blocked',
             wk2Rank: null, wk3Rank: null, monthChange: null, streak: null, avgRank: null,
             hotStreak: null, spike: null, consistentTop10: null,
+            price: null, currency: comp.currency ?? null,
           } : {
             handle: '__partial__',
             title: `⚠️ PARTIAL — incomplete crawl this week (${snapshot.rankedCount} ranked / ${snapshot.catalogCount} catalog before an early stop; manual check recommended)`,
@@ -282,6 +286,7 @@ async function run(args) {
             status: 'Partial',
             wk2Rank: null, wk3Rank: null, monthChange: null, streak: null, avgRank: null,
             hotStreak: null, spike: null, consistentTop10: null,
+            price: null, currency: comp.currency ?? null,
           };
           await writeCompetitorTab(sheets, cfg.sheetId, comp.name, [marker], date);
         }

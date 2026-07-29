@@ -507,3 +507,117 @@ only, never credential values. Append, don't rewrite.)*
   Palantir's competitor-tracker (see its SKILL.md). The real levers are platform-side (extend
   OpenClaw's ~2-min restart-defer to actually wait for an active cron task, or make `--command` jobs
   survive a gateway restart) — Chris's call at the OpenClaw level.
+
+**2026-07-29 — Live rate-limit probe (2 stores, mid-session for an unrelated price-column build)
+reveals a possible IP-wide `local_rate_limited` throttle — read-only, no fix attempted:**
+- **Context:** building a Price/Currency column feature (see the next entry below), two narrowly
+  scoped live fetches were explicitly authorized to confirm the products.json schema. Both hit the
+  same failure signature on two unrelated stores.
+- **Requests made** (approximate timestamps — exact per-request times weren't individually logged;
+  bounded by a `date` check at 09:06:58 CEST run between the gartenort and driftandtide attempts, and
+  session time ~09:19 CEST):
+  - `gartenort.de/collections/all/products.json` — **3 requests**, all before ~09:06:58 CEST.
+    Attempt 1 → `HTTP 429`, body `local_rate_limited`. Attempt 2 → a **compliance error**: a
+    headers-only probe (`curl -D -`) with the body routed to `/dev/null` came back `HTTP 200`, but
+    produced no usable schema data since the body was discarded. Attempt 3 (re-authorized, body
+    captured this time) → `HTTP 429`, body `local_rate_limited` again.
+  - `www.driftandtide.com/collections/all/products.json` — **1 request**, shortly after 09:06:58
+    CEST → `HTTP 429`, body `local_rate_limited`. Per instruction, no third store was attempted.
+  - **Recorded honestly because it affects how to read this:** of gartenort's 3 requests, only #1 and
+    #3 were within the single-request authorization; #2 was a self-inflicted deviation that also
+    wasted itself by discarding the body. This inflates gartenort's touch count for the session from
+    an intended 1 to 3 — it does not change the interpretation of the 429s, since both used the same
+    minimal, correctly-paced single-page request.
+- **Timing finding — normal weekly cadence was NOT enough cooldown this time, which is new:**
+  gartenort's last successful touch (per local snapshot mtime) was **2026-07-27 09:17:15 CEST** — the
+  first 429 today landed **under 48 hours** after that touch. Every prior self-inflicted 429 (BelroShop
+  07-20, ByEmiliaRose/CristalliSchwiiz 07-21) involved multiple scrapes of the *same* domain within
+  hours. This is the first time a *single* request, on a domain untouched for ~2 days, failed this
+  way — consistent with an IP-level throttle (this VPS's outbound address) rather than a per-domain
+  cooldown, though that's inferred from 2 data points on 2 domains, not confirmed.
+- **Link to prior investigation:** the exact signature — HTTP 429, body `local_rate_limited` — is the
+  same one Palantir's 2026-07-28 investigation already documented and built a fix for (see the
+  read-only comparison entry immediately below).
+- **Status: read-only. No fix attempted, no live retry, flagged for Chris.** Open question: is this
+  the same recurring throttle Palantir already characterized, now also visible on Scout's traffic, or
+  a separate escalation? Not established — would need either a natural cooldown + re-test, or checking
+  whether Palantir's own tracker has hit this on its recent runs.
+
+**2026-07-29 (same session) — Read-only comparison: does Palantir's lib.js handle `local_rate_limited`,
+and would Scout's current code survive it on Monday's run? (no edits to either file, no network calls):**
+- **Confirmed via direct code read:** Palantir's `politeFetchOnce()` (`~/scripts/competitor-tracker/lib.js`,
+  ~lines 94–146) DOES honor `Retry-After` on a 429 whose body contains `local_rate_limited` — parses the
+  header, caps it at `MAX_RETRY_AFTER_SECONDS = 120`, and waits that duration before the next retry
+  instead of the fixed ~1.5s/attempt escalating backoff. Its comment cites 10+ live probes on
+  2026-07-28 confirming a `Retry-After: 60` window genuinely clears once honored.
+- **Scout's current `politeFetch()` (lib.js lines 74–104) has none of this** — fixed backoff only
+  (`jitter + attempt*1500ms`), no `Retry-After` header read anywhere, no `local_rate_limited` body
+  detection. After `maxRetries` (3 → 4 total attempts, well under 20s of total backoff) it gives up
+  and returns `{status: null, ...}`.
+- **Plain answer: YES, Palantir's version honors Retry-After on `local_rate_limited` (confirmed by
+  direct read). NO, Scout's current code does not, and would not recover data from this throttle
+  mid-run if it's still active** — it exhausts its short retries in well under 20 seconds, nowhere
+  near the ~60s window Palantir observed, and marks the affected competitor(s) Blocked or Partial for
+  that week instead. This is safe (no crash, no corrupted baseline — the existing partial/blocked
+  design already prevents that) but not functional (no data recovered that week).
+- **UNVERIFIED:** whether this specific throttle episode is still active by the next scheduled run
+  (Monday 2026-08-03, Batch A 10:30 / Batch B 12:00 Manila) — only 2 data points ~13 minutes apart
+  this session, no visibility into duration or decay.
+- **Not implemented, not scoped beyond this comparison** — explicitly deferred to a separate
+  follow-up session per instruction. Neither file was modified.
+
+**2026-07-29 (same session) — Shipped: Price + Currency columns (Sheet + query.js), and fixed a
+real Sheet-erasure bug found while building it:**
+- **What shipped:** `Price` (first variant's price, Chris's call — D1) and `Currency` (manually-set
+  per-competitor `config.json` field, not derived/converted — D2) appended as the 18th/19th Sheet
+  columns. Surfaces: Sheet + `query.js` only, deliberately **not** Discord's weekly report (D3 —
+  message chunking is already tight at ~1900 chars). Tier-2-only competitors (Drune, NouveauRiche)
+  get permanently `null` price by design (D4 — no HTML price scraping built). Palantir port
+  explicitly deferred (D5) — nothing touched in `~/scripts/competitor-tracker/`.
+- **Schema verification blocked, documented, proceeded on documented contract:** the authorized
+  live schema-check fetch hit the same `local_rate_limited` throttle described in the entry above
+  (2 stores, both blocked) — implementation proceeded on Shopify's documented public `products.json`
+  contract instead, flagged `UNVERIFIED-THIS-SESSION` in `lib.js`'s `selectPrice()` comment and in
+  `SKILL.md`.
+- **Currency fetch dropped entirely, not deferred** — re-reading D2 mid-session, currency was
+  always a manually-set config value; the live fetch was only ever a convenience. `config.json` now
+  has `"currency": null` scaffolded for all 14 competitors, with graceful-null handling everywhere
+  it renders (blank Sheet cell; `query.js` prints `"(currency unknown)"` rather than a bare
+  number — a price with no currency label could be misread as the wrong currency across a
+  `.de`/`.com` mix of stores). Full list of competitors needing a real currency value was handed to
+  Chris to fill in by hand.
+- **Real bug found and fixed:** `writeCompetitorTab()`'s existing-row read range was a hardcoded
+  `'A2:Q'` (17 cols), decoupled from `SHEET_HEADER.length`. Adding 2 columns without fixing this
+  would have silently ERASED real Price/Currency values (not just left them blank) for any row not
+  touched by the current week's `computeMetrics()` output — e.g. a product removed 2+ weeks ago,
+  preserved only via the `padRow()` pass-through path — the moment that row went through one more
+  full-tab rewrite. Fixed by deriving the range from `SHEET_NCOL` via a new `colLetter()` helper
+  (`SHEET_LAST_COL`), so this class of bug is structurally impossible on the next column addition.
+- **Verification (no live runs):** 36 assertions across 6 synthetic fetch-mock scenarios (same
+  method as the 2026-07-17 partial/capped work) — multi-/single-variant price selection, Tier-2-only
+  synthesized rows, currency flowing from config, blocked/partial marker rows, WoW sign convention +
+  sort order unchanged. The regression test that mattered most — a prior-week row with a real price,
+  absent from this week's `computeMetrics()` output, must survive a full write cycle — was backed by
+  an actual **negative control**: a copy of the fix with only the range line reverted to the old
+  `A2:Q` was run against the identical scenario and confirmed the erasure really does fire without
+  the fix (a real `24.99 EUR` silently blanked). The first attempt at this test was worthless — the
+  mock Sheets client didn't respect the requested range width, so it couldn't have caught the bug
+  either way — caught and fixed before trusting the result.
+- **Correction to this session's own earlier investigation-phase report:** Drune/NouveauRiche were
+  described as getting "permanently blank price" as Tier-2-only stores — still true, but the
+  mechanism is stronger than described: under the *current, unmodified* `buildSnapshot()` logic
+  (confirmed via direct repro during mock-harness work, not guessed), a catalog-blocked run is
+  already flagged `partial` regardless of rank-scrape success, so it was never going to produce
+  per-product Sheet rows at all — just a `__partial__` marker, same as any other incomplete week.
+  The only local reference for "catalog blocked, ranks fine" was `data/drune-2026-07-16.json`,
+  captured *before* the 2026-07-17 fix that introduced the `partial` field — that snapshot predates
+  the field, it doesn't contradict this finding.
+- **Files changed:** `lib.js` (`selectPrice()`, `fetchCatalog()`, `buildSnapshot()`,
+  `computeMetrics()`, `SHEET_HEADER`, `colLetter()`/`SHEET_LAST_COL`, `rowFromMetric()`,
+  `writeCompetitorTab()`), `index.js` (marker-row literals only — no Discord report changes),
+  `query.js` (`fmtPrice()`, `line()`, `--product` detail view), `config.json` (currency scaffold).
+  `~/.openclaw/agents/scout/workspace/AGENTS.md` and `TOOLS.md` updated for the new data surface
+  and the one narrow hand-edited `config.json` field. `SKILL.md` updated (new "Price & Currency"
+  section, Google Sheet/Config/Ad-hoc-queries sections touched).
+- Full diff shown to Chris and approved before any file was written, per this session's working
+  agreement for multi-file changes with room for interpretation.

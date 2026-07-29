@@ -118,6 +118,38 @@ Consistent Top 10 (≤10 in every tracked week).
 - Service account: `/home/chris/scripts/google-service-account.json` (shared with CFNCS — this is
   the one intentionally-shared resource; Sheets access is scoped per-sheet by sharing, not by
   credential, so this does not expose any CFNCS/MFEO data to Scout or vice versa).
+- **19 columns** (added Price + Currency 2026-07-29, appended at the end — see below). The
+  existing-row read range that preserves history across the weekly clear-and-rewrite is **derived
+  from the header length** (`SHEET_LAST_COL` in `lib.js`), not a hardcoded literal — this was a
+  real bug found and fixed in the same session: a hardcoded range one column narrower than the
+  actual schema silently blanks any preserved row's trailing column(s) on the next rewrite.
+
+## Price & Currency (added 2026-07-29)
+
+- **Price** = the first variant's price from the JSON catalog (`p.variants[0].price`), isolated in
+  `selectPrice()` in `lib.js` so switching to e.g. min-across-variants later is a one-line change.
+  **UNVERIFIED-THIS-SESSION**: this relies on Shopify's documented public `products.json` schema
+  (`variants[].price` as a numeric string) — a live confirmation fetch was attempted (one request
+  each against gartenort.de and www.driftandtide.com) but both hit `HTTP 429 local_rate_limited`;
+  see the Primer's 2026-07-29 Execution Log entry for the full throttle finding.
+- **Currency** = a manually-set per-competitor field in `config.json` (`"currency"`, e.g. `"EUR"`).
+  Deliberately **not** derived from the domain TLD (unreliable — a `.de` store can price in any
+  currency) and **not** converted/normalized — shown as-is. Scaffolded to `null` for all 14
+  competitors as of 2026-07-29; ask Chris for the real values before treating the column as
+  trustworthy.
+- **Tier 2-only competitors (HTML rank scrape, no JSON catalog) get permanently `null` price** —
+  not a gap that'll close later. `extractGridHandles()` is a bare href regex against the
+  best-selling grid HTML; there is no price anywhere in that code path, and adding one would mean
+  theme-dependent HTML price scraping, a materially bigger and more fragile feature, explicitly
+  out of scope. (Note: under the *existing*, unmodified `buildSnapshot()` logic, a catalog-blocked
+  run is already flagged `partial` regardless of rank-scrape success, so this scenario doesn't
+  currently produce per-product Sheet rows at all today — just a marker row. Found via the mock
+  harness while verifying this feature, not a new behavior.)
+- **query.js** (`--product`, and the top-movers `line()` output) shows price **only** paired with
+  its currency (`"19.99 EUR"`) or an explicit `"(currency unknown)"` label — never a bare number
+  that could be misread as the wrong currency.
+- Discord's weekly report deliberately does **not** show price (message chunking is already tight
+  at ~1900 chars) — Sheet and `query.js` only.
 
 ## Ad-hoc queries — use query.js, NEVER read raw snapshots
 
@@ -136,6 +168,10 @@ node query.js --competitor Feanatic --product "<handle-or-text>"
 All computation happens in script-land for ~zero tokens; only a few rows are printed. **Scout must
 answer Discord questions about this data via `query.js`, never by reading `data/*.json` snapshots
 into model context** — same rule as Palantir's, documented in Scout's `AGENTS.md`.
+
+`--product` and the top-movers output now also show price, always paired with its currency
+(`"19.99 EUR"`) or an explicit `"(currency unknown)"` label if the competitor's `currency` isn't
+set in `config.json` yet — see "Price & Currency" above.
 
 ## Managing competitors (use competitors.js, don't hand-edit config)
 
@@ -212,7 +248,9 @@ real success/failure).
 `sheetId`, `discordChannelId`, `weeksToKeep` (snapshot retention, default 4), `maxCompetitors`,
 `addCooldownSeconds`, `fetch` (delays, timeout, retries, UA, page-safety cap),
 `spikeThreshold`/`flatThreshold`, `junkHandlePatterns`, and `competitors[]` (`name`, `baseUrl`,
-`collection`, `enabled`, optional `maxRankPages`). Manage `competitors[]` via `competitors.js`.
+`collection`, `enabled`, optional `maxRankPages`, `currency` — manually set, null until filled in,
+see "Price & Currency" above). Manage `competitors[]` via `competitors.js` (note: `competitors.js`
+doesn't currently prompt for `currency` on `--add` — hand-edit `config.json` for that field).
 
 ## Credentials
 

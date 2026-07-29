@@ -39,8 +39,14 @@ function parseArgs(argv) {
 const rk = v => (typeof v === 'number' ? `#${v}` : '—');
 const sg = v => (typeof v === 'number' ? (v > 0 ? `+${v}` : `${v}`) : '—');
 
+// Never render a bare price number — a figure with no currency beside it could be misread as
+// the wrong currency across stores. currency is a manually-set config value (config.json);
+// until Chris fills it in, say so explicitly rather than showing a naked figure.
+const fmtPrice = (price, currency) =>
+  price == null ? '—' : `${price.toFixed(2)} ${currency || '(currency unknown)'}`;
+
 function line(r) {
-  return `${rk(r.thisRank).padStart(5)}  (${sg(r.wow).padStart(5)})  ${r.title.slice(0, 50)}  [${r.handle}]`;
+  return `${rk(r.thisRank).padStart(5)}  (${sg(r.wow).padStart(5)})  ${r.title.slice(0, 50)}  [${r.handle}]  ${fmtPrice(r.price, r.currency)}`;
 }
 
 async function listCompetitors() {
@@ -85,6 +91,7 @@ async function main() {
     console.log(header);
     for (const r of matches.slice(0, 8)) {
       console.log(`\n${r.title}  [${r.handle}]  — ${r.status}`);
+      console.log(`  Price ${fmtPrice(r.price, r.currency)}`);
       console.log(`  This week ${rk(r.thisRank)} | last week ${rk(r.lastRank)} | WoW ${sg(r.wow)}`);
       console.log(`  Wk-2 ${rk(r.wk2Rank)} | Wk-3 ${rk(r.wk3Rank)} | Month change ${sg(r.monthChange)} | Avg(4w) ${r.avgRank ?? '—'}`);
       console.log(`  Streak ${r.streak} | HotStreak ${r.hotStreak} | Spike ${r.spike} | ConsistentTop10 ${r.consistentTop10}`);
