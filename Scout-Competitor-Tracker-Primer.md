@@ -792,6 +792,30 @@ slot (root cause of the 2026-07-29 Michaël/LaLuna/Tessa Discord exchange); adde
   now working *correctly*: 15 real slots, all genuinely in use. Adding Tessa requires either
   raising `maxCompetitors` or disabling one of the 15 currently-tracked competitors, and choosing
   which is a call for Chris/the external team, not something to decide unilaterally.
+- **Batch B runtime window — estimated, not directly measured** (the orientation's own hard rule
+  bars running `node index.js` or a manual `openclaw cron run` outside sanctioned, once-a-day use,
+  so the actual batch was not re-triggered just to time it). Batch B's roster changed net: **−**
+  JenniferJohnCharleston (removed), **+** JesseLondon and LaLunaMelbourne (both added since the
+  last real Batch B run on 07-27; RedlichBecker was already configured for Batch B before 07-27
+  and isn't a net change). Real numbers available from this session: JesseLondon's own baseline
+  capture (2026-07-29) took **~89s** for 777 products; LaLunaMelbourne's (2026-07-31, this
+  session) took **~130s** for 852 products — both measured as `data/<slug>-<date>.json` mtime
+  minus `lastAddAtMs` at the start of that add. Against Batch B's last verified full-run duration
+  of **3804s (~63.4 min)** on 07-27 (7 stores + Drune blocked), two more similarly-sized stores at
+  ~1.5–2 min each is a low-tens-of-seconds-to-a-few-minutes addition — nowhere close to threatening
+  the 7200s budget (~57 min of headroom at the 07-27 baseline alone). JenniferJohnCharleston's
+  removal further reduces the total by an unmeasured but nonzero amount (it was itself a normal
+  Tier 1+2 store in that same run). Net: **no runtime concern expected**, but this is an estimate
+  built from real per-store numbers, not a rerun of the actual batch — flag if Monday's real
+  `lastDurationMs` (`openclaw cron get 05acdb9e-…`) comes back surprising.
+- **LaLunaMelbourne has no `currency` set** (prints "(currency unknown)" in `query.js` price
+  output until hand-set in `config.json` — the documented one manual-edit exception, see
+  `TOOLS.md`). Pre-existing `--add` behavior, not something this session's fix changed.
+- **AGENTS.md §3 and SKILL.md's Batch B roster were also stale independent of this fix** (missing
+  RedlichBecker and JesseLondon, both added before this session — 07-20/21 and 07-29 respectively
+  — without a matching doc update at the time) — corrected in the same commit as this fix since it
+  was directly adjacent (JenniferJohnCharleston's removal made the same lines actively wrong), but
+  the RedlichBecker/JesseLondon staleness itself predates this session.
 - **Not touched:** the 15-competitor cap value itself (per the orientation: make the cap work
   correctly, not weaken it), the 60s add-cooldown logic (unchanged; not separately exercised this
   session since every `--add` attempt after LaLuna hit the cap check first — cap is checked before

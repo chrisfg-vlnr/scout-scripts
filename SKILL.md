@@ -51,8 +51,12 @@ selected by a per-competitor `"batch"` field in `config.json` via `--group`:
   5400s. CristalliSchwiiz (the ~1 h monster, `maxRankPages:2000`), ByEmiliaRose, Gartenort,
   DriftAndTide, NouveauRiche.
 - **Batch B** — job `05acdb9e-…`, **Mon 12:00 Manila** (90 min after A), `--group B
-  --include-ungrouped --wait-for-lock 1800`, timeout 4200s. HausOfMode, Feanatic, BelroShop,
-  LozendaFashion, RisoraShop, BreuerMode, JenniferJohnCharleston, Drune.
+  --include-ungrouped --wait-for-lock 1800`, timeout 4200s (superseded — raised to 7200s
+  2026-07-29, see primer). Roster drifts as competitors are added/removed; `config.json`'s
+  `batch` field is the source of truth. As of 2026-07-31: HausOfMode, Feanatic, BelroShop,
+  LozendaFashion, RisoraShop, BreuerMode, RedlichBecker, Drune, JesseLondon, LaLunaMelbourne.
+  JenniferJohnCharleston removed from tracking 2026-07-31 (Sheet tab/history kept, no longer
+  runs in any batch).
 
 Design notes:
 - **Each batch self-delivers its own Discord report** (header shows "Batch A"/"Batch B") — the team
