@@ -731,3 +731,70 @@ the "risk accepted" line above — the risk is now mitigated, not just logged:**
     core question Chris asked (does raising `timeoutSeconds` change this window) is answered no
     either way, since nothing ties the drain duration to job config in either description.
 - **Not touched:** `noOutputTimeoutSeconds`, any global config, `openclaw doctor --fix`.
+
+**2026-07-31 — Fixed: the 15-cap counted disabled entries, so `--disable` never actually freed a
+slot (root cause of the 2026-07-29 Michaël/LaLuna/Tessa Discord exchange); added `--remove`:**
+- **Symptom (2026-07-29 Discord, see `sessions/6610ed27-….jsonl.reset…`):** at 15/15 configured
+  competitors, Michaël asked to add LaLuna and Tessa. Scout correctly reported the cap, then
+  disabled `JenniferJohnCharleston` on request to make room — but the next `--add` still refused
+  at "15/15". Scout diagnosed live that the cap counts ALL entries (enabled + disabled), so
+  disabling one never actually freed anything, and flagged it for Chris since no command
+  available to it could resolve it.
+- **Root cause, confirmed by reading `competitors.js` before any edit:** `doAdd()`'s guard checked
+  `cfg.competitors.length >= maxCompetitors` (all entries) but its own refusal message said
+  "Disable one with `--disable`" — advice the code didn't actually honor. There was also no delete
+  path at all (`--list`/`--add`/`--enable`/`--disable` only), so a disabled entry was permanent
+  dead weight with no way to reclaim it even conceptually.
+- **Fix (`competitors.js`):**
+  1. Cap now counts **enabled** entries only (`enabledCount()` helper) — matches the actual abuse
+     surface (weekly scrape volume, live-fetch cost at `--add` time); a disabled entry costs
+     nothing. `--disable` now genuinely frees a slot immediately.
+  2. `--enable` on a disabled entry now checks the same cap (previously unchecked — re-enabling
+     could have silently pushed the enabled count above `maxCompetitors`). Existing `batch` field
+     is untouched by enable/disable either way, so a re-enabled competitor lands back in its
+     original weekly batch.
+  3. New `--remove "Name"` — permanently deletes the config array entry. Only allowed on an
+     already-disabled entry (safety: can't remove something still actively tracked without
+     disabling it first). **Confirmed live** (not just by code reading) that this does NOT touch
+     the competitor's Sheet tab or local `data/*.json` snapshots — both are looked up by name,
+     independent of `config.json`. This is a config-hygiene tool, not required to free a cap slot
+     anymore (enabled-only counting already does that).
+  4. Cap-exceeded message (`--add`) and the new enable-at-cap message now state the real
+     enabled/max counts and the exact working command to free a slot, plus mention `--remove` when
+     disabled entries exist to clean up.
+  5. `--list` now reports `N/max enabled (+K disabled, total)` instead of a bare total/max ratio.
+- **Docs updated to match:** `AGENTS.md` §2 (add/enable/disable/remove procedure, cap behavior,
+  explicit note that picking *which* enabled competitor to drop when the cap is hit is Chris's
+  call, not Scout's), `SKILL.md` (competitor-management command block + abuse-guard section).
+- **Investigated, not fixed — could not reproduce:** the "Exec failed: node
+  .../competitors.js" (bare invocation) report mentioned alongside this incident. Read
+  `competitors.js`'s `parseArgs`/`main()`: a bare invocation with no flags prints the usage string
+  and returns normally — no `process.exit(1)`, no thrown error. **Verified empirically**
+  (`node competitors.js`, no args): exit code 0, usage printed, no failure. The July 20
+  unknown-flag hard-fail (`console.error` + `process.exit(1)`) exists only in `index.js`'s
+  `parseArgs`, never existed in `competitors.js`'s. Also not present anywhere in the ground-truth
+  session log for the actual incident (`6610ed27-…`). Left as-is per "fix only what's confirmed
+  broken" — flagging here in case it recurs and turns out to be a different, real issue (e.g.
+  something in the exec/session layer, not the script itself).
+- **Live verification (real state, backed up `config.json` first to `backups/`):**
+  `--list` before: 15 total / 14 enabled / 1 disabled (JenniferJohnCharleston). Ran, in order, all
+  against live production config: `--add LaLunaMelbourne https://lalunamelbourne.co` → succeeded
+  immediately (14 < 15 enabled — the exact operation that was blocked on 2026-07-29, now working),
+  Tier 1+2, 852-product baseline, 100% coverage, Sheet tab created and synced at add-time.
+  `--add TessaBayside https://tessabayside.com` → correctly refused, new cap message fired
+  (15/15 enabled after LaLuna). `--enable JenniferJohnCharleston` → correctly refused by the new
+  enable-at-cap guard. `--remove JenniferJohnCharleston` → succeeded (was disabled); confirmed via
+  the Sheets API (`spreadsheets.get`) its tab still exists, and confirmed its two local snapshot
+  files (`2026-07-21`, `2026-07-27`) are untouched on disk. `--list` after: 15/15 enabled, 0
+  disabled, LaLunaMelbourne present, JenniferJohnCharleston absent from config (history intact
+  elsewhere).
+- **Tessa remains unaddressed — needs a decision, not a fix.** With the bug fixed, the cap is
+  now working *correctly*: 15 real slots, all genuinely in use. Adding Tessa requires either
+  raising `maxCompetitors` or disabling one of the 15 currently-tracked competitors, and choosing
+  which is a call for Chris/the external team, not something to decide unilaterally.
+- **Not touched:** the 15-competitor cap value itself (per the orientation: make the cap work
+  correctly, not weaken it), the 60s add-cooldown logic (unchanged; not separately exercised this
+  session since every `--add` attempt after LaLuna hit the cap check first — cap is checked before
+  cooldown in `doAdd()`, so cooldown wasn't actually the thing firing), any OpenClaw-platform
+  config (cron/session/timeout — nothing in this fix touches that layer, so no docs check was
+  needed or performed).

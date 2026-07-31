@@ -4,6 +4,9 @@ discord-token.json
 # Weekly catalog snapshots — runtime data, regenerated each week, large. Not source.
 data/
 
+# Local pre-change config.json backups — not source, safety copies only.
+backups/
+
 # Node modules
 node_modules/
 .run.lock

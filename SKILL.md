@@ -179,7 +179,8 @@ set in `config.json` yet — see "Price & Currency" above.
 node competitors.js --list
 node competitors.js --add "Name" "https://domain.com"       # live tier-detection, then adds (enabled)
 node competitors.js --enable  "Name"
-node competitors.js --disable "Name"                         # "remove" = disable (tab/history kept)
+node competitors.js --disable "Name"                         # stop scraping; Sheet tab/history kept; frees a cap slot (enabled-only cap, since 2026-07-31)
+node competitors.js --remove  "Name"                         # permanently delete the config entry (must already be disabled); Sheet tab/history still kept
 ```
 
 `--add` runs a **live tier-detection check** (JSON catalog page 1 + HTML best-selling page 1) and
@@ -222,8 +223,13 @@ is the Sheet's `__blocked__` marker row's `Last Updated` date, if present.
 Scout is exposed to an external Discord channel, so `--add` is not open-ended the way it is
 internally:
 
-- **Hard cap:** `config.json` → `maxCompetitors` (default 15). `--add` refuses once the cap is
-  hit; disable an existing entry first.
+- **Hard cap:** `config.json` → `maxCompetitors` (default 15), counting **enabled** entries only
+  (fixed 2026-07-31 — previously counted all entries including disabled ones, so `--disable`
+  never actually freed a slot despite the cap message telling you to disable to make room).
+  `--add` refuses once the cap is hit; disable an existing entry first — that alone frees a slot
+  now. `--enable` on a disabled entry respects the same cap. `--remove` permanently deletes an
+  already-disabled entry's config record (Sheet tab/snapshot history untouched) — a hygiene tool,
+  not required to free a slot.
 - **Cooldown:** `config.json` → `addCooldownSeconds` (default 60). `--add` refuses if the last
   successful add was more recent than this, tracked via `lastAddAtMs` in `config.json`.
 

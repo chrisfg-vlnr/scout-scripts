@@ -7,14 +7,23 @@
 //   node competitors.js --add "Name" "https://domain.com"   # live tier-detection, then add
 //   node competitors.js --enable  "Name"
 //   node competitors.js --disable "Name"
+//   node competitors.js --remove  "Name"   # permanently delete the config entry (must already be disabled)
 //
 // On --add the script runs a live tier-detection check (same endpoints as the weekly run:
 // JSON catalog + HTML best-selling rank) and reports the tier — including clearly if BLOCKED.
 //
 // Abuse guard (Scout is exposed to an external Discord channel, unlike the internal
-// CFNCS tracker): a hard cap on total tracked competitors, plus a short cooldown between
-// adds, since --add fetches live pages against an arbitrary caller-supplied domain and a
-// full baseline snapshot can be as expensive as a full weekly run for that one store.
+// CFNCS tracker): a hard cap on ENABLED tracked competitors (fixed 2026-07-31 — was
+// previously counting ALL entries including disabled ones, which meant --disable never
+// actually freed a slot, contradicting the cap-exceeded message's own advice), plus a short
+// cooldown between adds, since --add fetches live pages against an arbitrary caller-supplied
+// domain and a full baseline snapshot can be as expensive as a full weekly run for that one
+// store. The enabled-only cap keeps the real abuse surface (weekly scrape volume, live-fetch
+// cost at --add time) unchanged — a disabled entry costs nothing. The one tradeoff: total
+// config entries can now grow across disable→add cycles since disabling no longer requires
+// eventually removing. --remove exists as the hygiene tool for that — deleting a config entry
+// never touches its Sheet tab or local snapshot history, both of which are keyed independently
+// of config.json (by competitor name), so removed-then-re-added history isn't lost either.
 
 import {
   loadConfig, saveConfig, slug, findCompetitor, normalizeBaseUrl,
@@ -33,10 +42,17 @@ function parseArgs(argv) {
     if (v === '--add')      { a.add = true; a.name = argv[++i]; a.url = argv[++i]; }
     else if (v === '--enable')  a.enable = argv[++i];
     else if (v === '--disable') a.disable = argv[++i];
+    else if (v === '--remove')  a.remove = argv[++i];
     else if (v === '--list')    a.list = true;
     else if (v === '--collection') a.collection = argv[++i];
   }
   return a;
+}
+
+// The cap counts ENABLED entries only — a disabled entry costs nothing (no weekly scrape, no
+// live fetch), so it shouldn't consume a slot. See the file-header note (2026-07-31 fix).
+function enabledCount(cfg) {
+  return cfg.competitors.filter(c => c.enabled).length;
 }
 
 function tierLabel(d) {
@@ -63,7 +79,11 @@ async function lastKnownSnapshot(name) {
 
 async function doList() {
   const cfg = await loadConfig();
-  console.log(`Configured competitors (${cfg.competitors.length}/${cfg.maxCompetitors ?? 15}):\n`);
+  const maxCompetitors = cfg.maxCompetitors ?? 15;
+  const nEnabled = enabledCount(cfg);
+  const nDisabled = cfg.competitors.length - nEnabled;
+  console.log(`Configured competitors: ${nEnabled}/${maxCompetitors} enabled`
+    + (nDisabled ? ` (+${nDisabled} disabled, ${cfg.competitors.length} total)` : '') + '\n');
   for (const c of cfg.competitors) {
     const status = c.enabled ? 'ENABLED ' : 'disabled';
     console.log(`  [${status}] ${c.name}  ${c.baseUrl}`);
@@ -77,8 +97,14 @@ async function doAdd(name, url, collection) {
 
   // ─── abuse guard ──────────────────────────────────────────────────────────
   const maxCompetitors = cfg.maxCompetitors ?? 15;
-  if (cfg.competitors.length >= maxCompetitors) {
-    console.error(`At the tracked-competitor limit (${maxCompetitors}). Disable one with --disable before adding another.`);
+  const nEnabled = enabledCount(cfg);
+  if (nEnabled >= maxCompetitors) {
+    const nDisabled = cfg.competitors.length - nEnabled;
+    console.error(`At the tracked-competitor limit (${nEnabled}/${maxCompetitors} enabled). 0 slots free.\n`
+      + `Free one by disabling an existing competitor — node competitors.js --disable "Name" (see --list for names) — this immediately frees a slot for a new add.`
+      + (nDisabled > 0
+        ? `\nYou also have ${nDisabled} already-disabled entr${nDisabled === 1 ? 'y' : 'ies'} you could permanently delete instead: node competitors.js --remove "Name" (doesn't touch its Sheet tab or snapshot history).`
+        : ''));
     process.exit(1);
   }
   const cooldownSeconds = cfg.addCooldownSeconds ?? 60;
@@ -155,9 +181,36 @@ async function setEnabled(name, enabled) {
   const c = findCompetitor(cfg, name);
   if (!c) { console.error(`No competitor named "${name}". Run --list to see configured competitors.`); process.exit(1); }
   if (c.enabled === enabled) { console.log(`"${c.name}" is already ${enabled ? 'enabled' : 'disabled'}. No change.`); return; }
+  if (enabled) {
+    // Re-enabling must respect the same cap --add does — otherwise disable/enable cycling
+    // could push the scraped-weekly count above maxCompetitors. (Its existing `batch` field,
+    // if any, is untouched by disable/enable, so it lands back in the right weekly batch.)
+    const maxCompetitors = cfg.maxCompetitors ?? 15;
+    const nEnabled = enabledCount(cfg);
+    if (nEnabled >= maxCompetitors) {
+      console.error(`Can't enable "${c.name}" — already at the tracked-competitor limit (${nEnabled}/${maxCompetitors} enabled). Disable another competitor first.`);
+      process.exit(1);
+    }
+  }
   c.enabled = enabled;
   await saveConfig(cfg);
   console.log(`✔ "${c.name}" is now ${enabled ? 'ENABLED' : 'disabled'}.`);
+}
+
+async function doRemove(name) {
+  const cfg = await loadConfig();
+  const c = findCompetitor(cfg, name);
+  if (!c) { console.error(`No competitor named "${name}". Run --list to see configured competitors.`); process.exit(1); }
+  if (c.enabled) {
+    console.error(`"${c.name}" is still enabled. Disable it first, then remove it:\n`
+      + `  node competitors.js --disable "${c.name}"\n  node competitors.js --remove "${c.name}"`);
+    process.exit(1);
+  }
+  cfg.competitors = cfg.competitors.filter(x => x !== c);
+  await saveConfig(cfg);
+  console.log(`✔ "${c.name}" removed from tracked competitors (config entry deleted).\n`
+    + `Its Sheet tab and local snapshot history are untouched — only the config entry is gone. `
+    + `Re-adding it later (node competitors.js --add "${c.name}" "${c.baseUrl}") starts a fresh baseline and keeps writing to the same Sheet tab.`);
 }
 
 async function main() {
@@ -165,8 +218,9 @@ async function main() {
   if (a.add)          return doAdd(a.name, a.url, a.collection);
   if (a.enable)       return setEnabled(a.enable, true);
   if (a.disable)      return setEnabled(a.disable, false);
+  if (a.remove)       return doRemove(a.remove);
   if (a.list)         return doList();
-  console.log('Usage:\n  node competitors.js --list\n  node competitors.js --add "Name" "https://domain.com"\n  node competitors.js --enable "Name"\n  node competitors.js --disable "Name"');
+  console.log('Usage:\n  node competitors.js --list\n  node competitors.js --add "Name" "https://domain.com"\n  node competitors.js --enable "Name"\n  node competitors.js --disable "Name"\n  node competitors.js --remove "Name"   (must already be disabled)');
 }
 
 main().catch(e => { console.error(e?.stack || String(e)); process.exit(1); });

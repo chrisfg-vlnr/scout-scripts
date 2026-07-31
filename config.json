@@ -36,12 +36,12 @@
     {"name":"LozendaFashion","baseUrl":"https://lozendafashion.com","collection":"all","enabled":true,"batch":"B","currency":null},
     {"name":"Gartenort","baseUrl":"https://gartenort.de","collection":"all","enabled":true,"batch":"A","currency":null},
     {"name":"CristalliSchwiiz","baseUrl":"https://crystalli-schwiiz.com","collection":"all","enabled":true,"maxRankPages":2000,"batch":"A","currency":null},
-    {"name":"JenniferJohnCharleston","baseUrl":"https://jenniferjohn-charleston.com","collection":"all","enabled":false,"batch":"B","currency":null},
     {"name":"BreuerMode","baseUrl":"https://breuermode.de","collection":"all","enabled":true,"batch":"B","currency":null},
     {"name":"RisoraShop","baseUrl":"https://risora-shop.de","collection":"all","enabled":true,"batch":"B","currency":null},
     {"name":"DriftAndTide","baseUrl":"https://www.driftandtide.com","collection":"all","enabled":true,"batch":"A","currency":null},
     {"name":"RedlichBecker","baseUrl":"https://redlich-becker.de","collection":"all","enabled":true,"batch":"B","currency":null},
-    {"name":"JesseLondon","baseUrl":"https://jesse-london.co","collection":"all","enabled":true,"batch":"B"}
+    {"name":"JesseLondon","baseUrl":"https://jesse-london.co","collection":"all","enabled":true,"batch":"B"},
+    {"name":"LaLunaMelbourne","baseUrl":"https://lalunamelbourne.co","collection":"all","enabled":true,"batch":"B"}
   ],
-  "lastAddAtMs": 1785313979109
+  "lastAddAtMs": 1785458218399
 }
