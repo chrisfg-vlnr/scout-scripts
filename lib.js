@@ -263,7 +263,19 @@ export async function fetchCatalog(competitor, cfg) {
 
 const HREF_PRODUCT_RE = /href="[^"]*?\/products\/([a-z0-9][a-z0-9\-_%]*)(?:[?#][^"]*)?"/gi;
 
-export function extractGridHandles(html) {
+// Candidate container markers for the real collection-grid section, tried in order. Themes vary
+// — this is a list to try, not a single hardcoded shape. Confirmed present in HausOfMode's markup
+// (2026-08-05 investigation, see primer's Execution Log): the OLD whole-page regex below was
+// picking up ~50 product links from a sitewide Cart Drawer add-on-product upsell widget that sits
+// earlier in the page's byte order than the actual collection grid, corrupting the leading ~50
+// "ranks" on that store (real grid content only starts at `id="CollectionAjaxContent"`).
+const GRID_CONTAINER_MARKERS = [
+  /id="CollectionAjaxContent"/i,
+  /class="collection-grid__wrapper"/i,
+  /data-section-type="collection-grid"/i,
+];
+
+function extractHandlesFromSlice(html) {
   const seen = new Set();
   const ordered = [];
   let m;
@@ -273,6 +285,31 @@ export function extractGridHandles(html) {
     if (!seen.has(h)) { seen.add(h); ordered.push(h); }
   }
   return ordered;
+}
+
+// Scopes extraction to the real collection-grid container when the theme exposes one of the
+// known markers, so a sitewide widget earlier in the page (cart drawer, upsell, recommendations)
+// can't contaminate the leading "ranks" the way it did on HausOfMode. Falls back to the original
+// whole-page regex — byte-for-byte the same behavior as before this fix — whenever no marker
+// matches, OR the scoped slice yields zero products, so a theme with unfamiliar markup degrades
+// to today's (already-shipped, already-trusted) behavior rather than to zero data. This fallback
+// is the load-bearing safety property here: going from "wrong order" to "no data" would be worse
+// than the bug being fixed. Returns { handles, scoped, marker } — callers log/report which path
+// was taken per competitor, since a silent fallback is exactly how the original bug went
+// unnoticed for weeks.
+export function extractGridHandles(html) {
+  for (const marker of GRID_CONTAINER_MARKERS) {
+    const m = marker.exec(html);
+    if (!m) continue;
+    const startIdx = m.index;
+    const endMatch = /<\/main/i.exec(html.slice(startIdx));
+    const endIdx = endMatch ? startIdx + endMatch.index : html.length;
+    const scopedHandles = extractHandlesFromSlice(html.slice(startIdx, endIdx));
+    if (scopedHandles.length > 0) {
+      return { handles: scopedHandles, scoped: true, marker: marker.source };
+    }
+  }
+  return { handles: extractHandlesFromSlice(html), scoped: false, marker: null };
 }
 
 function makeJunkMatcher(patterns) {
@@ -310,6 +347,10 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
   // NOT cover a 200-with-sort_by-silently-ignored response (no redirect at all) — that's what
   // detectAlphabeticalSort() in buildSnapshot() is for.
   let urlIntegrityFail = false, urlIntegrityDetail = null;
+  // Grid-scoping visibility (2026-08-05 fix): decided from page 1 and logged once per
+  // competitor per run, rather than per page, since 300+ pages would otherwise flood the log —
+  // silent fallback is exactly how the original cart-drawer-contamination bug went unnoticed.
+  let gridScopeChecked = false, gridScopeOk = false, gridScopeMarker = null;
 
   while (page <= cap) {
     const url = `${base}/collections/${col}?sort_by=best-selling&page=${page}`;
@@ -335,7 +376,15 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
       // pagination, same as an empty grid below.
       break;
     }
-    const pageHandles = extractGridHandles(r.text);
+    const { handles: pageHandles, scoped, marker } = extractGridHandles(r.text);
+    if (!gridScopeChecked) {
+      gridScopeChecked = true;
+      gridScopeOk = scoped;
+      gridScopeMarker = marker;
+      console.error(`    [${competitor.name}] grid extraction: ${scoped ? `scoped via marker ${marker}` : 'FALLBACK — no known container marker matched; using whole-page extraction (same behavior as before this fix)'}`);
+    } else if (scoped !== gridScopeOk) {
+      console.error(`    [${competitor.name}] grid extraction: page ${page} scoping ${scoped ? 'succeeded' : 'failed'} — differs from page 1's result`);
+    }
     let added = 0;
     for (const h of pageHandles) {
       if (seen.has(h) || isJunk(h)) continue;
@@ -360,7 +409,7 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
     capped = true;
     error = `rank scrape hit the ${cap}-page cap while still finding new products — coverage incomplete (raise this store's maxRankPages)`;
   }
-  return { ok: ranked.length > 0 && !blocked, blocked, partial, capped, cap, handles: ranked, pages: page - 1, error, urlIntegrityFail, urlIntegrityDetail };
+  return { ok: ranked.length > 0 && !blocked, blocked, partial, capped, cap, handles: ranked, pages: page - 1, error, urlIntegrityFail, urlIntegrityDetail, gridScoped: gridScopeOk, gridScopeMarker };
 }
 
 // ─── sort-integrity check (alphabetical-fallback detector) ────────────────────
@@ -376,6 +425,17 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
 const SORT_SUSPECT_MIN_N = 15; // below this, chance alone can make a small real bestseller list look alphabetical — too few points to trust a correlation
 const SORT_SUSPECT_RHO = 0.90;
 const SORT_SUSPECT_ADJ = 0.90;
+// Bounded prefix windows, checked IN ADDITION to the full-catalog check below — added
+// 2026-08-05 after the HausOfMode cart-drawer incident showed the original whole-catalog-only
+// guard is mathematically blind to a contamination confined to the leading ranks: ~50 junk
+// entries diluted to invisibility across a ~13,873-product full-catalog correlation (that
+// incident's actual full-catalog ρ was -0.061 — nowhere near 0.90). Strictly additive: firing on
+// ANY window (full, top-30, or top-100) is sufficient to flag sortSuspect, so this can only make
+// the guard fire MORE often than before, never less. Threshold left at the existing 0.90 for all
+// windows, unchanged — see the primer's 2026-08-05 Execution Log for why it was NOT retuned even
+// though a single-page (N=85) extraction scores below threshold (ρ=0.679): that's a real,
+// reported number, not something to silently tune away.
+const SORT_SUSPECT_WINDOWS = [30, 100];
 
 // Locale heuristic from the store's own TLD — Shopify's "Alphabetically" sort and a plain
 // codepoint sort disagree on stores with accented titles (German umlauts, etc: naive ASCII
@@ -401,13 +461,11 @@ function spearman(aRanks, bRanks) {
   return 1 - (6 * sumD2) / (n * (n * n - 1));
 }
 
-// products: buildSnapshot()'s merged catalog+rank list ({handle, title, rank, ...}).
-export function detectAlphabeticalSort(products, domain) {
-  const ranked = products.filter(p => typeof p.rank === 'number' && p.title).sort((a, b) => a.rank - b.rank);
+// Scores one ordered list (full catalog or a bounded prefix) against a locale-aware alphabetical
+// sort of the same set. Shared by every window detectAlphabeticalSort() checks below.
+function scoreOrder(ranked, collator) {
   const n = ranked.length;
   if (n < SORT_SUSPECT_MIN_N) return { suspect: false, n, rho: null, adjPairFrac: null };
-
-  const collator = new Intl.Collator(localeForDomain(domain), { sensitivity: 'base', numeric: true });
   const alphaOrder = ranked.slice().sort((a, b) => collator.compare(a.title, b.title));
   const alphaRankByHandle = new Map(alphaOrder.map((p, i) => [p.handle, i + 1]));
   const alphaRanks = ranked.map(p => alphaRankByHandle.get(p.handle));
@@ -419,6 +477,32 @@ export function detectAlphabeticalSort(products, domain) {
   const adjPairFrac = adjOk / (n - 1);
 
   return { suspect: rho >= SORT_SUSPECT_RHO || adjPairFrac >= SORT_SUSPECT_ADJ, n, rho, adjPairFrac };
+}
+
+// products: buildSnapshot()'s merged catalog+rank list ({handle, title, rank, ...}).
+// Returns { suspect, n, rho, adjPairFrac, firedWindow, windows } — the top-level n/rho/adjPairFrac
+// always describe the FULL-catalog window (unchanged shape from before 2026-08-05's widening),
+// so existing callers (index.js's Discord one-liner, sortSuspectStats) keep working unmodified;
+// `windows` carries the full detail (including which bounded prefix fired, if any) for anyone
+// who wants it.
+export function detectAlphabeticalSort(products, domain) {
+  const ranked = products.filter(p => typeof p.rank === 'number' && p.title).sort((a, b) => a.rank - b.rank);
+  const collator = new Intl.Collator(localeForDomain(domain), { sensitivity: 'base', numeric: true });
+
+  const full = scoreOrder(ranked, collator);
+  const windows = { full: { window: ranked.length, ...full } };
+  for (const w of SORT_SUSPECT_WINDOWS) {
+    if (ranked.length <= w) continue; // window not smaller than the full catalog — would just duplicate `full`
+    windows[`top${w}`] = { window: w, ...scoreOrder(ranked.slice(0, w), collator) };
+  }
+
+  const firing = Object.entries(windows).find(([, r]) => r.suspect);
+  return {
+    suspect: !!firing,
+    n: full.n, rho: full.rho, adjPairFrac: full.adjPairFrac,
+    firedWindow: firing ? firing[0] : null,
+    windows,
+  };
 }
 
 // ─── fast tier detection (page-1 only) — for add-time checks ───────────────────
@@ -438,7 +522,7 @@ export async function detectTier(competitor, cfg) {
 
   const hr = await politeFetch(`${base}/collections/${col}?sort_by=best-selling&page=1`, cfg, { accept: 'text/html' });
   let htmlOk = false, htmlCount = 0, htmlErr = null;
-  if (hr.ok && hr.text) { const h = extractGridHandles(hr.text); htmlCount = h.length; htmlOk = h.length > 0; }
+  if (hr.ok && hr.text) { const { handles: h } = extractGridHandles(hr.text); htmlCount = h.length; htmlOk = h.length > 0; }
   else htmlErr = hr.error || `HTTP ${hr.status}`;
 
   let tier, blocked = false;
@@ -472,11 +556,21 @@ export async function buildSnapshot(competitor, cfg, date) {
     catalogCount: 0,
     rankedCount: 0,
     coverage: 0,
+    // Grid-scoping visibility (2026-08-05 fix): true when extractGridHandles() found a known
+    // collection-grid container marker for this store's theme and scoped to it; false when it
+    // fell back to the original whole-page regex (identical to pre-fix behavior). Not currently
+    // surfaced in Discord/Sheet output (that's report-structure territory, out of scope for this
+    // session — see primer) but logged per-run via console.error and saved here so it's visible
+    // in the snapshot JSON, not just in logs.
+    gridScoped: false,
+    gridScopeMarker: null,
     products: [],
   };
 
   const catalog = await fetchCatalog(competitor, cfg);
   const ranks   = await scrapeBestsellerRanks(competitor, cfg);
+  out.gridScoped = ranks.gridScoped;
+  out.gridScopeMarker = ranks.gridScopeMarker;
 
   if (catalog.blocked && ranks.blocked) {
     out.tier = 'Tier 3 (Blocked)';
@@ -567,13 +661,15 @@ export async function buildSnapshot(competitor, cfg, date) {
     const reasons = [];
     if (ranks.urlIntegrityFail) reasons.push(ranks.urlIntegrityDetail);
     if (sortCheck.suspect) {
-      const rhoStr = sortCheck.rho == null ? 'n/a' : sortCheck.rho.toFixed(2);
-      const adjStr = sortCheck.adjPairFrac == null ? 'n/a' : `${(sortCheck.adjPairFrac * 100).toFixed(0)}%`;
-      reasons.push(`recorded order correlates with alphabetical (Spearman ρ=${rhoStr}, adjacent-pair-match=${adjStr}, n=${sortCheck.n}) — looks like a sort fallback, not a real bestseller order`);
+      const fw = sortCheck.windows[sortCheck.firedWindow];
+      const rhoStr = fw.rho == null ? 'n/a' : fw.rho.toFixed(2);
+      const adjStr = fw.adjPairFrac == null ? 'n/a' : `${(fw.adjPairFrac * 100).toFixed(0)}%`;
+      const windowLabel = sortCheck.firedWindow === 'full' ? `full catalog (n=${fw.n})` : `top ${fw.window} (n=${fw.n})`;
+      reasons.push(`recorded order correlates with alphabetical in the ${windowLabel} (Spearman ρ=${rhoStr}, adjacent-pair-match=${adjStr}) — looks like a sort fallback, not a real bestseller order`);
     }
     if (reasons.length) {
       out.sortSuspect = true;
-      out.sortSuspectStats = { n: sortCheck.n, rho: sortCheck.rho, adjPairFrac: sortCheck.adjPairFrac, urlIntegrityFail: !!ranks.urlIntegrityFail };
+      out.sortSuspectStats = { n: sortCheck.n, rho: sortCheck.rho, adjPairFrac: sortCheck.adjPairFrac, urlIntegrityFail: !!ranks.urlIntegrityFail, firedWindow: sortCheck.firedWindow, windows: sortCheck.windows };
       out.tier += ' — SORT-SUSPECT (recorded order looks alphabetical, not ranked)';
       out.error = reasons.join(' | ');
     }

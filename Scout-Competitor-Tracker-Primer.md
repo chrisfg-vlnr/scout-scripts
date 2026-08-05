@@ -921,3 +921,104 @@ integrity guard shipped:**
   equivalence to Palantir's already-live-verified version instead; next Monday's scheduled run
   (on/after 2026-08-10) is the first real-world exercise of this guard — check whether HausOfMode
   fires it again, and whether it's still `sortSuspect` or has reverted.
+
+**2026-08-05 (later same day) — CORRECTION to the entry above: the "silently ignores sort_by"
+conclusion was wrong. Root cause was a page-wide extraction regex, not a sort/redirect problem.**
+
+The entry above's central mechanism claim — *"hausofmode.de is silently ignoring the sort_by URL
+parameter entirely... no redirect"* — is **wrong**, and is being corrected here rather than
+deleted, per Chris's instruction not to erase investigation history. What was actually true and
+what wasn't:
+
+- **Still true:** no server-side redirect occurred (confirmed independently again this session,
+  see the new entry below). That specific sub-finding stands.
+- **Wrong:** the inference that this proves sort_by is "silently ignored." **The three-URL test
+  that conclusion rested on (`best-selling` / `title-ascending` / no param, all returning an
+  identical leading ~30-handle sequence) could not actually discriminate between the competing
+  explanations, and this was missed at the time.** Concretely: `/collections/all` defaulting to
+  alphabetical order, `title-ascending` being *explicitly* alphabetical, and "sort_by is silently
+  ignored" (falling back to some default that happens to look alphabetical) all predict the exact
+  same observable result — an alphabetical-looking leading sequence, unchanged across all three
+  requests. Three hypotheses, one shared prediction. Observing that prediction come true proved
+  nothing about which hypothesis was correct; the test was worthless by construction, not by
+  execution — a good example of the "state what each hypothesis predicts before testing" rule
+  this project now follows.
+- **What a follow-up investigation later the same day actually found** (full detail in that
+  session's entry, immediately below): the leading ~30-85 "handles" in a single-page fetch were
+  never the collection grid at all. `extractGridHandles()` is a page-wide `href` regex with no
+  container scoping. HausOfMode's theme renders a sitewide **Cart Drawer add-on-product upsell
+  widget** earlier in the page's byte order than the actual collection grid section
+  (`id="CollectionAjaxContent"`). That widget is present, in the same order, on every page/sort/
+  collection combination — which is *why* three different sort_by values produced identical
+  output: none of those three requests ever reached the real grid within the extraction's first
+  ~30-50 matches. The real grid (items ~51-85 on a page-1 fetch) showed no alphabetical signature
+  at all in that session's sampling.
+- **Still genuinely unverified, in either session:** whether `sort_by=best-selling` measurably
+  reorders the *real* collection grid by actual sales rank. Neither session ran an A/B test of
+  different sort_by values isolated to just the scoped grid content — the only sort_by comparison
+  ever run was against the (sort-independent) cart-drawer widget, which is exactly the test that's
+  now known to be worthless. Labelled UNVERIFIED here rather than asserted either way. This does
+  not block today's fix: the grid-scoping fix and the sort-integrity guard both work regardless of
+  whether sort_by is genuinely honored, because they detect/prevent contamination of the *recorded
+  order*, not the *cause* of any given order.
+
+See the new entry immediately below for the fix that grew out of this correction.
+
+**2026-08-05 (grid-scoping session) — root-caused and fixed the actual mechanism; widened the
+sort-integrity guard; corrected the entries above:**
+- **Root cause, confirmed:** `extractGridHandles()`'s page-wide, unscoped `href` regex was
+  extracting a sitewide Cart Drawer add-on-product widget's ~50 links (present earlier in byte
+  order) ahead of the real collection-grid section on hausofmode.de, corrupting the leading ~50
+  "ranks" of every crawl since at least 2026-07-20. Confirmed directly: scoping a saved page-1
+  fetch to `id="CollectionAjaxContent"` yields exactly 35 products whose first five, in order,
+  match what Chris saw in a real browser (Versichertes Paket, Drahtlose 1080P Mini WiFi
+  Sicherheitskamera - SecureView, Hilf unserer Natur, Ultraschnelle Externe SSD - SpeedDrive Pro,
+  Komfortable Orthopädische Keilabsatz-Espadrilles - Clara).
+- **page=2 hard gate (resolved a loose end from the follow-up session):** a page=2 probe run just
+  before this session appeared to show page=2 returning content identical to page=1, including the
+  real-grid section — which would have meant pagination was broken and the next scheduled run
+  would collapse to ~85 products instead of ~13,873. Re-tested this session with a 3-request
+  budget (fresh page=1, plain page=2, cache-busted page=2, all ≥20s apart, hausofmode.de only):
+  **not reproduced.** Items 0-49 (the cart-drawer widget) are identical between page=1 and page=2,
+  as expected for a sitewide, page-independent component. Items 50-84 (the real grid) are
+  **completely different** between the two pages — 35 distinct new handles, zero overlap.
+  Pagination is fine; the earlier finding was a probe artefact, not a real fault. Full detail in
+  this session's report.
+- **Fix shipped (`lib.js`):** `extractGridHandles()` now tries a candidate list of known
+  collection-grid container markers (`id="CollectionAjaxContent"`, `class="collection-grid__wrapper"`,
+  `data-section-type="collection-grid"`) before falling back to the original whole-page regex —
+  byte-for-byte the same behavior as before this fix — whenever no marker matches or the scoped
+  slice yields zero products, so an unfamiliar theme degrades to today's already-trusted behavior
+  rather than to zero data. Returns `{ handles, scoped, marker }`; `scrapeBestsellerRanks()` and
+  `buildSnapshot()` log and carry this per-competitor per-run (`gridScoped`/`gridScopeMarker` on
+  the snapshot) so a silent fallback can never again hide the way the original bug did. Validated
+  live against 4 other roster competitors (Gartenort, RisoraShop, DriftAndTide, CristalliSchwiiz —
+  mixed German/non-German, mixed catalog size): zero change in extracted output on any of the 4;
+  DriftAndTide's theme has the marker and scoped successfully but happened to have no leading junk
+  to remove, so its output was identical either way. Strong evidence (not exhaustive — 10 of 15
+  enabled competitors were not live-checked) this incident is isolated to HausOfMode.
+- **`detectAlphabeticalSort()` widened** to also score bounded prefixes (top-30, top-100) in
+  addition to the existing full-catalog check, strictly additive (fires if ANY window crosses the
+  unchanged 0.90 threshold). Mechanism proven sound with a synthetic test (forcing only the real
+  top-30 of a real snapshot alphabetical fires via the `top30` window at ρ=1.00, while the
+  full-catalog check alone stays clean — exactly the class of smaller-scale, leading-ranks-only
+  incident the original whole-catalog-only guard was blind to). **Honest, unretouched finding:**
+  neither the real historical HausOfMode snapshot nor a single-page synthetic reconstruction of
+  this specific incident crosses the 0.90 threshold at ANY window (best figures seen: top-30
+  adjacent-pair-match 0.79 on real historical data, ρ=0.68 on a single-page pre-fix extraction) —
+  the widened guard, as specified, would **not** have caught this particular incident's actual
+  magnitude either. Per instruction, the threshold was not retuned to force a pass; this is
+  reported as-is for Chris to weigh. The guard's real, demonstrated value is as a general backstop
+  for a *fully*-alphabetical-leading-ranks incident, not this specific partial-correlation one —
+  the grid-scoping fix above is what actually protects against this incident's mechanism.
+- **Verification:** re-ran the ground-truth scoped-extraction check against the fixed code path
+  (see above); confirmed `data/` untouched (file count, latest mtime, `git status --ignored` all
+  unchanged); rollback tag `pre-grid-scoping-fix-20260805-105848` created, pushed, and round-trip
+  verified via `git fetch --tags` before any edit; `config.json` re-backed-up (unchanged content).
+- **Not done, by explicit instruction:** the HausOfMode baseline decision (every stored snapshot
+  since 2026-07-20 has corrupt ranks 1-50; the next run will diff corrected ranks against a
+  corrupted baseline) was analyzed and a recommendation given, but NOT implemented — Chris's call.
+  Advisor was unavailable both times it was invoked this session (consistent with 5 failed
+  attempts across today's earlier sessions) — flagged, not silently skipped. Full detail, including
+  per-competitor roster validation numbers and the baseline-impact quantification, in
+  `~/Scout_GridScoping_Fix_Report_Aug5.md`.

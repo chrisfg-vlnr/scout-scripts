@@ -142,8 +142,9 @@ Consistent Top 10 (≤10 in every tracked week).
   competitors as of 2026-07-29; ask Chris for the real values before treating the column as
   trustworthy.
 - **Tier 2-only competitors (HTML rank scrape, no JSON catalog) get permanently `null` price** —
-  not a gap that'll close later. `extractGridHandles()` is a bare href regex against the
-  best-selling grid HTML; there is no price anywhere in that code path, and adding one would mean
+  not a gap that'll close later. `extractGridHandles()` (container-scoped with a whole-page
+  fallback as of 2026-08-05 — see below) is still just an href regex against the best-selling grid
+  HTML either way; there is no price anywhere in that code path, and adding one would mean
   theme-dependent HTML price scraping, a materially bigger and more fragile feature, explicitly
   out of scope. (Note: under the *existing*, unmodified `buildSnapshot()` logic, a catalog-blocked
   run is already flagged `partial` regardless of rank-scrape success, so this scenario doesn't
@@ -327,9 +328,22 @@ for any competitor that never redirects. See the Primer's 2026-08-05 Execution L
    catalog and rank scrape both succeeded — but `buildSnapshot()` believes the recorded rank
    *order* is wrong: it either lost `sort_by` to a redirect (`urlIntegrityFail`, exact) or
    correlates too strongly with a locale-aware alphabetical sort of the same titles
-   (`detectAlphabeticalSort()`, ρ≥0.90 or adjacent-pair-match≥0.90 on n≥15 ranked products — a
-   real bestseller order has no reason to resemble A-Z order). Root-caused live on HausOfMode:
-   `sort_by=best-selling` was accepted with a 200 and silently ignored, not redirected around.
+   (`detectAlphabeticalSort()`, checked against the full catalog AND bounded top-30/top-100
+   prefixes as of a same-day follow-up fix — ρ≥0.90 or adjacent-pair-match≥0.90 on n≥15 ranked
+   products in ANY window — a real bestseller order has no reason to resemble A-Z order).
+   **CORRECTED 2026-08-05 (was wrong earlier the same day):** this was NOT a `sort_by` being
+   "accepted and silently ignored." The actual root cause on HausOfMode was `extractGridHandles()`
+   being an unscoped, page-wide regex that picked up a sitewide Cart Drawer upsell widget's ~50
+   product links — present, identically ordered, on every page/sort/collection combination —
+   ahead of the real collection grid in the page's byte order. The three-sort-value comparison
+   that originally seemed to prove "sort_by ignored" was actually comparing that sort-independent
+   widget against itself three times; it never touched the real grid at all, so it couldn't have
+   shown anything about sort_by either way. **Fixed 2026-08-05 (later the same day):**
+   `extractGridHandles()` now scopes to a known collection-grid container marker first
+   (`id="CollectionAjaxContent"` and others), falling back to the old whole-page regex — unchanged
+   behavior — when no marker matches or the scoped slice is empty, so an unfamiliar theme can
+   never lose data, only lose the (already-broken) contamination. See the Primer's 2026-08-05
+   Execution Log (both the correction entry and the grid-scoping-fix entry) for full detail.
    Handled like Partial, not Capped — flagged in Discord and a `__sort_suspect__` Sheet marker,
    snapshot **not saved**, even though it's coverage-complete: a "complete" week with the wrong
    order would silently corrupt week-over-week movers, which is worse than losing a week.
