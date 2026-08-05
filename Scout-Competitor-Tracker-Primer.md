@@ -822,3 +822,102 @@ slot (root cause of the 2026-07-29 Michaël/LaLuna/Tessa Discord exchange); adde
   cooldown in `doAdd()`, so cooldown wasn't actually the thing firing), any OpenClaw-platform
   config (cron/session/timeout — nothing in this fix touches that layer, so no docs check was
   needed or performed).
+
+**2026-08-05 — HausOfMode alphabetical rank data: investigated, root-caused (partially), sort-
+integrity guard shipped:**
+- **Symptom:** Chris observed in a browser that `hausofmode.de` collection pages with
+  `?sort_by=best-selling` (the correct spelling — confirmed `lib.js` has always used it, not the
+  invalid `best-sellers`) appeared to redirect to `/collections/all`, and suspected Scout's
+  `redirect: 'follow'` was silently chasing a server-side redirect that drops the sort param —
+  the same class of gap Palantir closed 2026-07-28 (`redirect: 'manual'` + paced hop loop,
+  `81a258b`) but Scout never ported.
+- **Offline audit (zero HTTP, read-only) first:** wrote a Spearman-rank-correlation +
+  adjacent-pair-match scorer, locale-aware (`Intl.Collator`, TLD-derived locale — a naive ASCII
+  sort would misorder German umlauts and produce false signals) comparing each snapshot's
+  recorded rank order against an A-Z sort of the same product set. Ran it over all 45 snapshots
+  across all 16 competitors ever tracked. Validated the scorer against a synthetic fully-
+  alphabetical control built from a real product set (scored a perfect ρ=1.000, correctly
+  flagged) before trusting it on real data. **Result: every snapshot of every competitor, through
+  2026-08-03, scored near-zero correlation (HausOfMode: ρ≈-0.06, indistinguishable from every
+  other clean competitor) — no historical evidence of alphabetical fallback anywhere, ever.**
+  This meant the browser-observed problem, if real, had to postdate the 2026-08-03 snapshot (no
+  competitor has any snapshot after that date — the next scheduled run hadn't run yet).
+- **Live investigation (6-request budget, hausofmode.de only, ≥20s paced, `redirect: 'manual'`
+  probe mirroring Scout's exact UA/timeout):**
+  1. `GET /collections/all?sort_by=best-selling&page=1` — **200, `Location: null`. No server-side
+     redirect at all**, ruling out the suspected mechanism (H0) outright. The returned product
+     grid was nonetheless visibly alphabetical-by-handle (`1-stuck-...`, `1-5l-...`,
+     `10-wiederverwendbare-...`, `100-baumwolle-...`, `1000-gramm-...`, ascending) after 3 pinned
+     items up front.
+  2. `GET ...?sort_by=title-ascending&page=1` and `GET ...?page=1` (no sort param at all) both
+     returned the **identical first-30 product sequence** as step 1's `best-selling` request.
+     Three different sort_by values (including none) → one identical order. The parameter is
+     being accepted and silently ignored, not redirected around.
+  3. `GET /collections.json?limit=50` — no collection with handle exactly `all` exists (there is
+     a German `alle` / "ALLE", handle `alle`, 8529 products, unrelated) — `/collections/all` is
+     Shopify's auto-generated virtual collection, not a merchant-created manual one. Rules against
+     (though doesn't fully rule out — only 50 of an unknown total collections were checked) the
+     "manual collection shadow" explanation being *why*; doesn't change the *what*.
+  4. `GET /collections/damenbekleidung?sort_by=best-selling&page=1` (a second, real, named
+     collection) — **same leading product sequence as `/collections/all`.** The failure isn't
+     specific to the `all` view.
+  - **Conclusion: H0 (redirect) and H1 (invalid sort_by spelling) are ruled out by direct
+    evidence. sort_by is present in the URL, correctly spelled, and has zero effect on the
+    returned order** — consistent with H2/H3 (a theme/collection-query layer that doesn't wire
+    the URL param to the actual product order; Shopify docs and community reports confirm this is
+    theme-implementation-dependent, not a platform guarantee — see sources below). **Not
+    determined:** whether this is a deliberate anti-scraping measure or an unrelated site change
+    (new merchandising app, theme swap, admin resort) that happened to land in the same ~2-day
+    window; no way to infer merchant intent from the outside. The 30x the browser appeared to
+    show was not reproduced at the HTTP layer in 6 requests — most likely a client-side
+    (JS/`history.replaceState`) URL change that never reaches a `fetch()`-based scraper, but this
+    is inference, not confirmed with a real browser trace this session.
+  - Sources checked: shopify.dev `sort_by` filter and `ProductCollectionSortKeys` docs (neither
+    documents manual-collection sort_by override behavior one way or the other — labelled
+    UNVERIFIED at the platform level), Shopify community threads confirming sort_by-ignored is a
+    known real-world theme-level failure mode.
+- **Fix shipped (`lib.js`, `index.js`):**
+  1. **Ported Palantir's `redirect: 'manual'` + `MAX_REDIRECT_HOPS` (5) paced hop loop**
+     (`politeFetchOnce`/`politeFetch` split, same shape/names as `81a258b`), keeping Scout's own
+     narrower Retry-After scoping (`local_rate_limited`-only) unchanged. **This did NOT fix or
+     catch this incident** (confirmed no redirect occurred) — it closes a separate, real,
+     pre-existing gap: HausOfMode's `config.json` entry is a bare domain (no `www`), the same
+     shape as Palantir's actual root cause on `driftandtide.com`. Departure from Palantir's exact
+     port: also returns `finalUrl`/`hops` (Palantir's doesn't), needed for check (2) below.
+  2. **`urlIntegrityFail`** in `scrapeBestsellerRanks()`: hard, exact check — if a redirect hop
+     *did* occur and the final URL lost `sort_by`, flag it. Would not have caught this incident
+     (no redirect occurred) but is cheap now that the hop loop exists, and covers a future
+     redirect-shaped incident on this or another competitor.
+  3. **`detectAlphabeticalSort()`** in `buildSnapshot()`: the mechanism-agnostic backstop that
+     actually would have caught this — reuses the offline audit's exact method (Spearman ρ +
+     adjacent-pair-match, locale-aware, `n≥15` minimum) against the fresh weekly snapshot.
+     Suspect if ρ≥0.90 or adjacent-pair-match≥0.90.
+  4. New `sortSuspect` flag, sibling to `blocked`/`partial`/`capped`, same idiom. **Behaves like
+     `partial`, not `capped`, per Chris's explicit call**: flagged loudly (Sheet marker row,
+     Discord one-liner naming the likely cause and telling the human to check the site directly),
+     and **not saved as the week's baseline** — even though coverage is complete, because a
+     misordered "complete" week is worse than a short one: nothing about a saved snapshot's shape
+     would reveal it's wrong. Whole snapshot is discarded on fire (catalog data included), matching
+     `partial`'s existing coarseness rather than inventing a new catalog-only-partial state.
+- **Verification:** negative control (not just a passing test) — imported the real shipped
+  `detectAlphabeticalSort()` and ran it against (a) HausOfMode's real 2026-08-03 snapshot
+  (13,873 ranked products) → `suspect: false`, ρ=-0.06 [must-not-fire, passed]; (b) a synthetic
+  snapshot built from the same real product set with ranks replaced by pure alphabetical order →
+  `suspect: true`, ρ=1.00 [must-fire, passed]; (c) every other competitor's latest real snapshot
+  → zero false positives. `data/` confirmed untouched all session (file count unchanged at 45,
+  latest mtime still the original 2026-08-03 scrape, `git status` shows only `lib.js`/`index.js`
+  modified). Did NOT run `node index.js` or trigger a cron run, per instruction.
+- **Rollback point:** tag `pre-sort-integrity-guard-20260805-084921`, pushed and round-trip
+  verified via `git fetch --tags`; `config.json` backed up to `backups/config.json.20260805-084934.bak`
+  before any edit (config itself was not changed).
+- **Not yet done / open:** the *why* behind hausofmode.de's behavior (deliberate vs. incidental)
+  is unresolved and likely unresolvable from outside; the full extent of what changed in HausOfMode's
+  first-~30-85 grid items across two different collections (identical leading handles, but total
+  extracted-handle counts differed 50 vs 85 between sort values — not fully characterized, budget
+  exhausted before this could be dug into; `extractGridHandles()`'s page-wide regex doesn't
+  distinguish a collection's real grid from other on-page product links, which may be part of the
+  85-vs-50 gap); no live confirmation this session that the ported redirect-hop-loop is a true
+  no-op on a normal non-redirecting store (budget was hausofmode.de-only) — relying on structural
+  equivalence to Palantir's already-live-verified version instead; next Monday's scheduled run
+  (on/after 2026-08-10) is the first real-world exercise of this guard — check whether HausOfMode
+  fires it again, and whether it's still `sortSuspect` or has reverted.

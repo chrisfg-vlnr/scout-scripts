@@ -297,6 +297,14 @@ which the Primer entry shows could threaten Batch B's timeout margin if multiple
 it independently on the same run. If a batch times out or gets SIGTERM'd, check the console for
 `[rate-limit]` lines first.
 
+**Also before a page counts toward anything below (added 2026-08-05):** `politeFetch()` now
+follows redirects itself, one paced hop at a time (`redirect: 'manual'`, capped at
+`MAX_REDIRECT_HOPS = 5`), instead of via `fetch()`'s built-in `redirect: 'follow'` — ported from
+Palantir's `81a258b` (2026-07-28). A bare-domain competitor config (no `www` — HausOfMode's is
+one) hitting a `canonical_host_redirection` on every paginated request would, under the old
+`follow` behavior, resolve invisibly inside a single `fetch()` call, unpaced and unlogged. No-op
+for any competitor that never redirects. See the Primer's 2026-08-05 Execution Log.
+
 1. JSON catalog + HTML rank (normal).
 2. HTML rank only / catalog only (degraded — logged).
 3. **Blocked** (e.g. Cloudflare 403/409/429 on page 1 — no usable data at all): never crashes the
@@ -315,6 +323,16 @@ it independently on the same run. If a batch times out or gets SIGTERM'd, check 
    further. (Fixed 2026-07-17 — see the Primer's Execution Log. Before this fix, a mid-crawl wall
    was silently indistinguishable from Shopify signaling "no more pages," so a wall-hit crawl was
    reported as a complete, trustworthy week with no error surfaced anywhere.)
+5. **Sort-suspect** (added 2026-08-05 — see the Primer's Execution Log): coverage is complete —
+   catalog and rank scrape both succeeded — but `buildSnapshot()` believes the recorded rank
+   *order* is wrong: it either lost `sort_by` to a redirect (`urlIntegrityFail`, exact) or
+   correlates too strongly with a locale-aware alphabetical sort of the same titles
+   (`detectAlphabeticalSort()`, ρ≥0.90 or adjacent-pair-match≥0.90 on n≥15 ranked products — a
+   real bestseller order has no reason to resemble A-Z order). Root-caused live on HausOfMode:
+   `sort_by=best-selling` was accepted with a 200 and silently ignored, not redirected around.
+   Handled like Partial, not Capped — flagged in Discord and a `__sort_suspect__` Sheet marker,
+   snapshot **not saved**, even though it's coverage-complete: a "complete" week with the wrong
+   order would silently corrupt week-over-week movers, which is worse than losing a week.
 
 ## Error handling
 

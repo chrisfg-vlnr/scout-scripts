@@ -157,6 +157,14 @@ function buildCompetitorReport(summary, prettyDate) {
   if (summary.blocked) {
     return `⚠️ **${name}** — BLOCKED this week (${summary.tier}). No data. Manual check recommended.`;
   }
+  if (summary.sortSuspect) {
+    const st = summary.sortSuspectStats;
+    const stStr = st ? ` (ρ=${st.rho == null ? 'n/a' : st.rho.toFixed(2)}, n=${st.n}${st.urlIntegrityFail ? ', redirect dropped sort_by' : ''})` : '';
+    return `⚠️ **${name}** — SORT-SUSPECT this week (${summary.tier}). Full coverage (${summary.rankedCount ?? 0} ranked / `
+      + `${summary.catalogCount ?? 0} catalog) but the recorded order looks alphabetical, not sales-ranked${stStr}. `
+      + `Not saved as this week's baseline. Store likely changed its default collection sort or its theme doesn't honor `
+      + `sort_by — check the site directly before trusting next week's movers. Manual check recommended.`;
+  }
   if (summary.partial) {
     return `⚠️ **${name}** — PARTIAL this week (${summary.tier}). ${summary.rankedCount ?? 0} ranked / `
       + `${summary.catalogCount ?? 0} catalog before an early stop${summary.error ? ` — ${summary.error}` : ''}. `
@@ -243,12 +251,17 @@ async function run(args) {
       const snapshot = await buildSnapshot(comp, cfg, date);
       console.log(`  ${snapshot.tier} | catalog ${snapshot.catalogCount} | ranked ${snapshot.rankedCount} | coverage ${(snapshot.coverage * 100).toFixed(0)}%${snapshot.error ? ' | ' + snapshot.error : ''}`);
 
-      // Never persist a blocked OR partial snapshot as this week's baseline. A blocked (empty)
-      // catalog would mislabel next week's whole catalog as "New This Week"; a partial one (a
-      // mid-crawl wall stopped the rank scrape or catalog fetch early) would just as wrongly
-      // mislabel every not-yet-reached product as "Removed From Store" the moment a future run
-      // reaches further. Comparison should always baseline against the last COMPLETE week.
-      const incomplete = snapshot.blocked || snapshot.partial;
+      // Never persist a blocked, partial, OR sort-suspect snapshot as this week's baseline. A
+      // blocked (empty) catalog would mislabel next week's whole catalog as "New This Week"; a
+      // partial one (a mid-crawl wall stopped the rank scrape or catalog fetch early) would just
+      // as wrongly mislabel every not-yet-reached product as "Removed From Store" the moment a
+      // future run reaches further. sort-suspect (added 2026-08-05 — see primer) is coverage-
+      // complete but believed MISORDERED (looks alphabetical, not sales-ranked): saving it would
+      // silently replace a known-good rank baseline with alphabetical noise that looks exactly
+      // like real data — worse than the other two, since nothing about a saved snapshot's shape
+      // reveals it's wrong. Comparison should always baseline against the last COMPLETE, TRUSTED
+      // week.
+      const incomplete = snapshot.blocked || snapshot.partial || snapshot.sortSuspect;
       if (!args.noSave && !incomplete) { await saveSnapshot(snapshot, comp); }
       if (!args.noSave && !args.noPrune) {
         const pruned = await pruneSnapshots(comp.name, cfg.weeksToKeep);
@@ -258,12 +271,13 @@ async function run(args) {
       if (incomplete) {
         summary = {
           competitor: comp.name, blocked: snapshot.blocked, partial: snapshot.partial,
+          sortSuspect: snapshot.sortSuspect, sortSuspectStats: snapshot.sortSuspectStats,
           tier: snapshot.tier, error: snapshot.error,
           catalogCount: snapshot.catalogCount, rankedCount: snapshot.rankedCount,
         };
         // Mark it visibly in the Sheet too. Preserves any existing product rows from prior
         // good weeks; upserts one marker row keyed on a stable handle.
-        const label = snapshot.blocked ? 'BLOCKED' : 'PARTIAL';
+        const label = snapshot.blocked ? 'BLOCKED' : snapshot.sortSuspect ? 'SORT-SUSPECT' : 'PARTIAL';
         console.log(`  ${label} — flagged in report${sheets ? ' + Sheet marker' : ''} (snapshot not saved).`);
         if (sheets) {
           // price: always null — a marker row has no product data, real or otherwise.
@@ -275,6 +289,15 @@ async function run(args) {
             url: comp.baseUrl, productType: '',
             lastRank: null, thisRank: null, wow: null,
             status: 'Blocked',
+            wk2Rank: null, wk3Rank: null, monthChange: null, streak: null, avgRank: null,
+            hotStreak: null, spike: null, consistentTop10: null,
+            price: null, currency: comp.currency ?? null,
+          } : snapshot.sortSuspect ? {
+            handle: '__sort_suspect__',
+            title: `⚠️ SORT-SUSPECT — full coverage (${snapshot.rankedCount} ranked / ${snapshot.catalogCount} catalog) but the recorded order looks alphabetical, not sales-ranked (${snapshot.error}); not saved as this week's baseline. Manual check recommended.`,
+            url: comp.baseUrl, productType: '',
+            lastRank: null, thisRank: null, wow: null,
+            status: 'SortSuspect',
             wk2Rank: null, wk3Rank: null, monthChange: null, streak: null, avgRank: null,
             hotStreak: null, spike: null, consistentTop10: null,
             price: null, currency: comp.currency ?? null,

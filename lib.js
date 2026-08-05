@@ -75,8 +75,27 @@ function jitter(cfg) {
 // `local_rate_limited`; this cap gives 2x headroom above that observed value).
 const MAX_RETRY_AFTER_SECONDS = 120;
 
-// Sequential, paced fetch. Sleeps a randomized 1–2s BEFORE every request so callers
-// looping over pages stay polite automatically. Retries transient errors (429/5xx/network).
+// Ported 2026-08-05 from Palantir's MAX_REDIRECT_HOPS (2026-07-28 fix, commit 81a258b) — see
+// the redirect-pacing note on politeFetch() below for why.
+const MAX_REDIRECT_HOPS = 5;
+
+// One HTTP attempt sequence against a single URL: paced retries on transient errors
+// (429/5xx/network), 3xx responses returned as-is (never retried — a redirect is deterministic,
+// retrying it can't change it). `redirect: 'manual'` so the caller sees and paces every hop
+// itself, rather than fetch() silently chasing a redirect inside one call — ported 2026-08-05
+// from Palantir's politeFetchOnce()/politeFetch() split (2026-07-28 fix, commit 81a258b),
+// prompted by the 2026-08-05 HausOfMode sort-integrity investigation (see primer). That
+// investigation's live evidence turned out NOT to be a redirect (hausofmode.de returned 200
+// with `sort_by` silently ignored, not a 3xx) — so this port did not fix that specific incident.
+// It closes a real, separate, pre-existing gap Scout has been carrying since Palantir's original
+// fix: a bare-domain competitor config (HausOfMode's `baseUrl` IS bare, no `www` — see config.json)
+// hitting a canonical_host_redirection on every paginated request would, under the old
+// `redirect: 'follow'`, resolve invisibly to fetch()'s own second HTTP request per hop — unpaced,
+// unlogged, and silently doubling effective request volume against that store's rate-limit bucket,
+// exactly Palantir's root-caused driftandtide.com incident. Verified against Palantir's own
+// characterization: this is a no-op whenever no 3xx is encountered (every competitor that doesn't
+// redirect), so it does not change per-page request volume for the common case — confirm this
+// holds before a full batch run if a future incident suggests otherwise.
 //
 // Retry-After handling ported 2026-07-29 from Palantir's politeFetchOnce() (2026-07-28 fix),
 // after Scout's own schema-check fetches hit this exact wall this session (see primer's
@@ -87,9 +106,9 @@ const MAX_RETRY_AFTER_SECONDS = 120;
 // `local_rate_limited` (Shopify's own rate-limit signature) — a 429 without that body, or any
 // 5xx, falls through to the existing fixed backoff unchanged. Deliberate, per explicit scoping
 // for this port, not an oversight — flagged so this doesn't get "fixed" to match Palantir later
-// without that being a conscious choice. Redirect pacing and the consecutive-page-end change from
-// the same Palantir fix set are explicitly NOT ported here — see the primer for that scoping.
-export async function politeFetch(url, cfg, { accept = 'text/html' } = {}) {
+// without that being a conscious choice. Still true after the 2026-08-05 redirect-pacing port
+// below: only the redirect handling was brought in line with Palantir, not this scoping.
+async function politeFetchOnce(url, cfg, { accept = 'text/html' } = {}) {
   const { timeoutMs, maxRetries, userAgent } = cfg.fetch;
   let lastErr = null;
   let nextWaitMs = null; // set by a local_rate_limited 429's Retry-After; overrides the default backoff once
@@ -101,7 +120,7 @@ export async function politeFetch(url, cfg, { accept = 'text/html' } = {}) {
     const t = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const res = await fetch(url, {
-        redirect: 'follow',
+        redirect: 'manual',
         signal: ctrl.signal,
         headers: {
           'User-Agent': userAgent,
@@ -110,6 +129,13 @@ export async function politeFetch(url, cfg, { accept = 'text/html' } = {}) {
         },
       });
       clearTimeout(t);
+      if (res.status >= 300 && res.status < 400) {
+        // Node's native fetch under redirect:'manual' returns the redirect transparently
+        // (status/location readable) rather than the browser's opaque 'opaqueredirect' —
+        // verified live by Palantir 2026-07-28, applies equally here (same runtime). Return
+        // immediately; the outer politeFetch hop loop paces the follow.
+        return { status: res.status, ok: false, ctype: res.headers.get('content-type') || '', text: '', location: res.headers.get('location') };
+      }
       if (res.status === 429 || res.status >= 500) {
         // Body read (needed to detect local_rate_limited) only on 429 — a 5xx can never match,
         // so skip the extra await there. Palantir's version reads the body unconditionally; this
@@ -143,6 +169,30 @@ export async function politeFetch(url, cfg, { accept = 'text/html' } = {}) {
     console.error(`    [rate-limit] retries exhausted after honoring Retry-After — giving up on this page.`);
   }
   return { status: null, ok: false, ctype: '', text: '', error: lastErr };
+}
+
+// Sequential, paced fetch. Sleeps a randomized 1–2s BEFORE every request so callers looping
+// over pages stay polite automatically. Retries transient errors (429/5xx/network). Follows
+// redirects itself, one paced hop at a time (bounded by MAX_REDIRECT_HOPS), instead of via
+// fetch()'s built-in redirect:'follow'. Ported 2026-08-05 from Palantir's politeFetch()
+// (2026-07-28 fix, commit 81a258b) — see politeFetchOnce() above for why.
+//
+// DEPARTURE from Palantir's shape: also returns `finalUrl` and `hops`, which Palantir's version
+// doesn't surface. Added for the sort-integrity guard below (scrapeBestsellerRanks needs to know
+// whether a hop silently changed the URL it asked for, in particular dropping `sort_by`) — not
+// needed by Palantir today, so not backported there.
+export async function politeFetch(url, cfg, { accept = 'text/html' } = {}) {
+  let currentUrl = url;
+  let lastResult = null;
+  for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+    lastResult = await politeFetchOnce(currentUrl, cfg, { accept });
+    if (lastResult.status >= 300 && lastResult.status < 400 && lastResult.location) {
+      currentUrl = new URL(lastResult.location, currentUrl).toString();
+      continue;
+    }
+    return { ...lastResult, finalUrl: currentUrl, hops: hop };
+  }
+  return { ...lastResult, finalUrl: currentUrl, hops: MAX_REDIRECT_HOPS, error: (lastResult.error ? lastResult.error + ' | ' : '') + `redirect hop limit (${MAX_REDIRECT_HOPS}) exceeded` };
 }
 
 // ─── JSON catalog (full product list + metadata; NOT a sales rank) ─────────────
@@ -253,10 +303,22 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
   const seen = new Set();
   const ranked = [];
   let page = 1, blocked = false, partial = false, capped = false, error = null, emptyOrDupPages = 0;
+  // urlIntegrityFail: a redirect hop (see politeFetch's MAX_REDIRECT_HOPS loop) landed us on a
+  // URL that dropped the `sort_by` we asked for — a hard, exact signal that whatever HTML we
+  // parsed did not come from the bestseller-sorted view we requested. Cheap and unambiguous
+  // where it applies; added 2026-08-05 per the sort-integrity investigation (see primer). Does
+  // NOT cover a 200-with-sort_by-silently-ignored response (no redirect at all) — that's what
+  // detectAlphabeticalSort() in buildSnapshot() is for.
+  let urlIntegrityFail = false, urlIntegrityDetail = null;
 
   while (page <= cap) {
     const url = `${base}/collections/${col}?sort_by=best-selling&page=${page}`;
     const r = await politeFetch(url, cfg, { accept: 'text/html' });
+    if (!urlIntegrityFail && r.hops > 0 && r.finalUrl && !/[?&]sort_by=/.test(r.finalUrl)) {
+      urlIntegrityFail = true;
+      urlIntegrityDetail = `redirected away from the requested sort (${r.hops} hop(s)): ${url} -> ${r.finalUrl}`;
+      console.error(`    [${competitor.name}] URL-integrity: ${urlIntegrityDetail}`);
+    }
     if (r.status === 403 || r.status === 409 || r.status === 401 || r.status === 430) {
       blocked = true; error = `HTTP ${r.status}`; break;
     }
@@ -298,7 +360,65 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
     capped = true;
     error = `rank scrape hit the ${cap}-page cap while still finding new products — coverage incomplete (raise this store's maxRankPages)`;
   }
-  return { ok: ranked.length > 0 && !blocked, blocked, partial, capped, cap, handles: ranked, pages: page - 1, error };
+  return { ok: ranked.length > 0 && !blocked, blocked, partial, capped, cap, handles: ranked, pages: page - 1, error, urlIntegrityFail, urlIntegrityDetail };
+}
+
+// ─── sort-integrity check (alphabetical-fallback detector) ────────────────────
+// Mechanism-agnostic backstop for the 2026-08-05 HausOfMode incident: whatever the cause turns
+// out to be on any given store — a redirect that drops sort_by (see urlIntegrityFail above), a
+// theme that doesn't wire sort_by up to the collection query at all, a manual collection's own
+// admin-set order — a fallback-to-default listing will closely match a locale-aware A-Z sort of
+// the same product set, and a genuine bestseller ordering has no reason to correlate with
+// alphabetical order at all. Method and thresholds validated 2026-08-05 against every snapshot
+// in this tracker's history (every real competitor scored near-zero correlation, i.e. this does
+// NOT fire on legitimately-ranked data) and a synthetic fully-alphabetical control built from a
+// real product set (scored a perfect 1.000) — see the primer's Execution Log for both.
+const SORT_SUSPECT_MIN_N = 15; // below this, chance alone can make a small real bestseller list look alphabetical — too few points to trust a correlation
+const SORT_SUSPECT_RHO = 0.90;
+const SORT_SUSPECT_ADJ = 0.90;
+
+// Locale heuristic from the store's own TLD — Shopify's "Alphabetically" sort and a plain
+// codepoint sort disagree on stores with accented titles (German umlauts, etc: naive ASCII
+// sort puts "Ä" after "Z"), so this must be locale-aware, not a byte sort. TLD is a proxy, not
+// a store's confirmed storefront language — reasonable across this roster's current mix of
+// .de/.com/.co domains (checked 2026-08-05), but a store with a mismatched TLD/language could
+// weaken the signal. Extend with more TLDs (or a per-competitor config override) if this roster
+// grows a real .nl/.fr competitor and starts producing borderline scores.
+function localeForDomain(domain) {
+  const d = String(domain || '').toLowerCase();
+  if (d.includes('.de')) return 'de';
+  if (d.includes('.nl')) return 'nl';
+  if (d.includes('.fr')) return 'fr';
+  return 'en';
+}
+
+// Spearman rank correlation between two same-length permutations of 1..n.
+function spearman(aRanks, bRanks) {
+  const n = aRanks.length;
+  if (n < 2) return null;
+  let sumD2 = 0;
+  for (let i = 0; i < n; i++) { const d = aRanks[i] - bRanks[i]; sumD2 += d * d; }
+  return 1 - (6 * sumD2) / (n * (n * n - 1));
+}
+
+// products: buildSnapshot()'s merged catalog+rank list ({handle, title, rank, ...}).
+export function detectAlphabeticalSort(products, domain) {
+  const ranked = products.filter(p => typeof p.rank === 'number' && p.title).sort((a, b) => a.rank - b.rank);
+  const n = ranked.length;
+  if (n < SORT_SUSPECT_MIN_N) return { suspect: false, n, rho: null, adjPairFrac: null };
+
+  const collator = new Intl.Collator(localeForDomain(domain), { sensitivity: 'base', numeric: true });
+  const alphaOrder = ranked.slice().sort((a, b) => collator.compare(a.title, b.title));
+  const alphaRankByHandle = new Map(alphaOrder.map((p, i) => [p.handle, i + 1]));
+  const alphaRanks = ranked.map(p => alphaRankByHandle.get(p.handle));
+  const recordedRanks = ranked.map((_, i) => i + 1);
+  const rho = spearman(recordedRanks, alphaRanks);
+
+  let adjOk = 0;
+  for (let i = 0; i < n - 1; i++) if (collator.compare(ranked[i].title, ranked[i + 1].title) <= 0) adjOk++;
+  const adjPairFrac = adjOk / (n - 1);
+
+  return { suspect: rho >= SORT_SUSPECT_RHO || adjPairFrac >= SORT_SUSPECT_ADJ, n, rho, adjPairFrac };
 }
 
 // ─── fast tier detection (page-1 only) — for add-time checks ───────────────────
@@ -346,6 +466,8 @@ export async function buildSnapshot(competitor, cfg, date) {
     partial: false,
     capped: false,
     cappedAt: null,
+    sortSuspect: false,
+    sortSuspectStats: null,
     error: null,
     catalogCount: 0,
     rankedCount: 0,
@@ -425,6 +547,36 @@ export async function buildSnapshot(competitor, cfg, date) {
     out.error = ranks.error;
   } else if (!ranks.ok && catalog.ok) {
     out.error = `rank scrape failed: ${ranks.error || 'no ranks'}`;
+  }
+
+  // Sort-integrity check — runs whenever we have real ranked data (independent of `capped`;
+  // even a capped top-N can be misordered). NOT run over `partial`/`blocked` snapshots — too
+  // little data to trust a correlation, and those already don't get saved for other reasons.
+  // Deliberately behaves like `partial`, not `capped`, when it fires: flags loudly and — via
+  // the `incomplete` gate in index.js — is NOT saved as this week's baseline. Chris's explicit
+  // call 2026-08-05: silently overwriting a known-good baseline with alphabetical noise is the
+  // worst outcome available, worse than losing a week's rank-mover data, which capped's
+  // save-anyway behavior is fine with because capped data is genuinely still rank-ordered, just
+  // truncated. Two independent triggers, OR'd together (either alone is sufficient):
+  //   (i)  urlIntegrityFail — a redirect hop dropped `sort_by` (exact, no heuristics)
+  //   (ii) detectAlphabeticalSort — the recorded order itself correlates with alphabetical
+  //        (mechanism-agnostic backstop; this is the one that actually caught HausOfMode, since
+  //        that incident turned out to be a silently-ignored sort_by, not a redirect)
+  if (!out.blocked && !out.partial) {
+    const sortCheck = detectAlphabeticalSort(out.products, competitor.baseUrl);
+    const reasons = [];
+    if (ranks.urlIntegrityFail) reasons.push(ranks.urlIntegrityDetail);
+    if (sortCheck.suspect) {
+      const rhoStr = sortCheck.rho == null ? 'n/a' : sortCheck.rho.toFixed(2);
+      const adjStr = sortCheck.adjPairFrac == null ? 'n/a' : `${(sortCheck.adjPairFrac * 100).toFixed(0)}%`;
+      reasons.push(`recorded order correlates with alphabetical (Spearman ρ=${rhoStr}, adjacent-pair-match=${adjStr}, n=${sortCheck.n}) — looks like a sort fallback, not a real bestseller order`);
+    }
+    if (reasons.length) {
+      out.sortSuspect = true;
+      out.sortSuspectStats = { n: sortCheck.n, rho: sortCheck.rho, adjPairFrac: sortCheck.adjPairFrac, urlIntegrityFail: !!ranks.urlIntegrityFail };
+      out.tier += ' — SORT-SUSPECT (recorded order looks alphabetical, not ranked)';
+      out.error = reasons.join(' | ');
+    }
   }
 
   return out;
