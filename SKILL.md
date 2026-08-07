@@ -34,45 +34,77 @@ node /home/chris/scripts/scout-competitor-tracker/index.js --help               
   ignored and launched a full 8-competitor scrape.)
 - **`.run.lock` concurrency guard** — a second run while one is live refuses with **exit 3**
   and points at the lock file. Stale locks (dead pid) are replaced automatically; only delete
-  `.run.lock` by hand if you've confirmed the pid in it is not a tracker run.
+  `.run.lock` by hand if you've confirmed the pid in it is not a tracker run. The lock is a
+  single global lock shared by all batches (not per-batch) — this is what makes `--wait-for-lock`
+  work uniformly across any number of batches.
 - **Manual reruns go through the registered cron job(s)**, not a raw `node index.js`. Rerun only
-  the batch that needs it: `openclaw cron run 34357ef3-6885-4d40-a406-b3b16a46a92e` (Batch A) /
-  `openclaw cron run 05acdb9e-dae7-43b6-8fcf-7d0e87e41488` (Batch B).
+  the batch that needs it:
+  `openclaw cron run 34357ef3-6885-4d40-a406-b3b16a46a92e` (Batch A) /
+  `openclaw cron run 95657ebe-99b6-4266-80f2-f94f1ec14c04` (Batch B) /
+  `openclaw cron run faee47e1-a0fe-4d53-8d0f-57aa27528276` (Batch C) /
+  `openclaw cron run 05acdb9e-dae7-43b6-8fcf-7d0e87e41488` (Batch D).
   Max one manual rerun per day — repeated same-day crawls escalate Cloudflare-style walls.
 
-## Weekly batches (added 2026-07-21)
+## Weekly batches (added 2026-07-21, restructured 2026-08-07 for the 15→20 cap raise)
 
-The weekly run is **split into two staggered cron jobs**, not one — at 13 competitors (two of them
-14k–19k-product monsters: HausOfMode, CristalliSchwiiz) a single sequential run grew to ~2 h,
-outgrowing any safe timeout. Each batch is the same `index.js`/`lib.js`/`.run.lock` machinery,
-selected by a per-competitor `"batch"` field in `config.json` via `--group`:
+The weekly run is **split into four staggered cron jobs**, not one — at up to 20 competitors
+(one of them a 19k-product monster, CristalliSchwiiz) a single sequential run would run several
+hours, and bunching all scrape volume into one ~90-minute window is the worst shape for the
+documented IP-wide Shopify `local_rate_limited` throttle risk (see primer, 2026-07-29 entries).
+Each batch is the same `index.js`/`lib.js`/`.run.lock` machinery, selected by a per-competitor
+`"batch"` field in `config.json` via `--group`:
 
-- **Batch A** — job `34357ef3-…`, **Mon 10:30 Manila**, `--group A --wait-for-lock 600`, timeout
-  5400s. CristalliSchwiiz (the ~1 h monster, `maxRankPages:2000`), ByEmiliaRose, Gartenort,
-  DriftAndTide, NouveauRiche.
-- **Batch B** — job `05acdb9e-…`, **Mon 12:00 Manila** (90 min after A), `--group B
-  --include-ungrouped --wait-for-lock 1800`, timeout 4200s (superseded — raised to 7200s
-  2026-07-29, see primer). Roster drifts as competitors are added/removed; `config.json`'s
-  `batch` field is the source of truth. As of 2026-07-31: HausOfMode, Feanatic, BelroShop,
-  LozendaFashion, RisoraShop, BreuerMode, RedlichBecker, Drune, JesseLondon, LaLunaMelbourne.
-  JenniferJohnCharleston removed from tracking 2026-07-31 (Sheet tab/history kept, no longer
-  runs in any batch).
+- **Batch A** — job `34357ef3-…`, **Mon 08:00 Manila**, `--group A --wait-for-lock 300`, timeout
+  **10800s (3h)**. CristalliSchwiiz **only** — the ~14–19k-product monster (`maxRankPages:2000`,
+  historically ~57–78 min alone). Solo by design: even alone it's the single largest batch: giving
+  it a 3h ceiling (instead of the other batches' 7200s) keeps it under ~50% of its own timeout
+  under a realistic worst-case, which it could not do inside 7200s (see the 2026-08-07 primer
+  entry). Scheduled first and early specifically so it finishes (~09:15–09:30 typical) well
+  before Palantir's 10:00 storefront scrape starts.
+- **Batch B** — job `95657ebe-…`, **Mon 11:30 Manila** (3.5h after A), `--group B
+  --wait-for-lock 1800`, timeout 7200s. ByEmiliaRose, Gartenort, DriftAndTide, NouveauRiche.
+  Starts a full hour after Palantir's `competitor-tracker-weekly` (Mon 10:00, ~35 min) is
+  expected to finish — that job scrapes DriftAndTide too, so this gap is intentional, not
+  incidental.
+- **Batch C** — job `faee47e1-…`, **Mon 13:30 Manila** (2h after B), `--group C
+  --wait-for-lock 1800`, timeout 7200s. Feanatic, BelroShop, HausOfMode. BelroShop is the store
+  that got rate-limit-walled on 2026-07-20 and is also scraped by Palantir (as "Belro") at 10:00 —
+  this batch's 3.5h clearance from that scrape is deliberate extra margin, not just stagger
+  spacing.
+- **Batch D** — job `05acdb9e-…`, **Mon 15:30 Manila** (2h after C), `--group D
+  --include-ungrouped --wait-for-lock 1800`, timeout 7200s. The **catch-all** batch (any
+  enabled competitor with no `batch` runs here) and the destination `competitors.js --add`
+  assigns new competitors to (`config.json`'s `defaultBatch: "D"`) — it currently carries the
+  most headroom of the four, by design, to absorb the 15→20 cap's 5 new slots without needing
+  another restructure. As of 2026-08-07: BreuerMode, RisoraShop, RedlichBecker, JesseLondon,
+  LaLunaMelbourne, Drune, LozendaFashion.
+
+Roster drifts as competitors are added/removed/rebalanced; `config.json`'s `batch` field is
+always the source of truth — the lists above are a convenience summary, not authoritative.
 
 Design notes:
-- **Each batch self-delivers its own Discord report** (header shows "Batch A"/"Batch B") — the team
-  sees two messages Monday. Simpler than coordinating one combined report across two jobs.
-- **`--include-ungrouped`** on Batch B is a safety net: any enabled competitor with no `batch` (e.g.
-  a hand-edited config) is still scraped by B, never silently skipped. `competitors.js --add` also
-  auto-tags new competitors `batch:"B"`.
+- **Each batch self-delivers its own Discord report** (header shows "Batch A/B/C/D") — the team
+  sees up to four messages Monday, spread from ~08:00 to ~16:00. Simpler than coordinating one
+  combined report across four jobs, and the spread-out timing is intentional (throttle recovery
+  time between batches), not a bug to compress.
+- **`--include-ungrouped`** is now only on Batch D (the catch-all) — any enabled competitor with
+  no `batch` (e.g. a hand-edited config) is scraped there, never silently skipped.
+  `competitors.js --add` auto-tags new competitors with `config.json`'s `defaultBatch` (currently
+  `"D"`), not a hardcoded letter — this is what makes the auto-assignment correct regardless of
+  how many batches exist.
 - **`--wait-for-lock N`**: if a batch starts while another run holds `.run.lock`, it waits up to N
-  seconds (polling) instead of failing — so a slightly-overrunning Batch A doesn't make Batch B
-  exit 3. Manual/ad-hoc runs (no flag) still fail fast on a live lock.
-- **BelroShop is in Batch B (12:00)**, clear of CFNCS/Palantir's own Belro scrape at 10:00 — no
-  same-domain double-hit from the shared VPS.
-- Both jobs are `--no-deliver` (delivery.mode `none`, script-owned) with the same
-  `--failure-alert-*` config DMing Chris on Telegram (riding the Palantir account). `$0` model tokens.
-- **To rebalance batches:** edit the `"batch"` field per competitor in `config.json` (A/B). To add a
-  third batch, register another cron job with `--group C` and a later stagger.
+  seconds (polling) instead of failing — so a slightly-overrunning earlier batch doesn't make the
+  next one exit 3. Manual/ad-hoc runs (no flag) still fail fast on a live lock. Because the lock
+  is global (see the Guards section above), this works the same regardless of batch count.
+- All four jobs are `--no-deliver` (delivery.mode `none`, script-owned) with the same
+  `--failure-alert-*` config DMing Chris on Telegram (riding the Palantir account). `$0` model
+  tokens.
+- **To rebalance batches:** edit the `"batch"` field per competitor in `config.json` (A/B/C/D).
+  To add a fifth batch, register another cron job with `--group E` and a later stagger, and
+  consider moving `defaultBatch` to it if it becomes the new lowest-committed-time batch.
+  **If a future `--add` turns out to be another CristalliSchwiiz-sized store**, move it to its
+  own batch (or Batch A) rather than leaving it in the Batch D catch-all — Batch D's headroom
+  assumes future adds are modest-sized, not monsters.
 
 ## Data source — IMPORTANT (inherited from Phase 1 findings on the CFNCS tracker)
 
@@ -228,7 +260,9 @@ is the Sheet's `__blocked__` marker row's `Last Updated` date, if present.
 Scout is exposed to an external Discord channel, so `--add` is not open-ended the way it is
 internally:
 
-- **Hard cap:** `config.json` → `maxCompetitors` (default 15), counting **enabled** entries only
+- **Hard cap:** `config.json` → `maxCompetitors` (default 20, raised from 15 on 2026-08-07 —
+  see the primer entry for the batch-restructure work that had to land first), counting
+  **enabled** entries only
   (fixed 2026-07-31 — previously counted all entries including disabled ones, so `--disable`
   never actually freed a slot despite the cap message telling you to disable to make room).
   `--add` refuses once the cap is hit; disable an existing entry first — that alone frees a slot

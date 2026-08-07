@@ -79,7 +79,7 @@ async function lastKnownSnapshot(name) {
 
 async function doList() {
   const cfg = await loadConfig();
-  const maxCompetitors = cfg.maxCompetitors ?? 15;
+  const maxCompetitors = cfg.maxCompetitors ?? 20;
   const nEnabled = enabledCount(cfg);
   const nDisabled = cfg.competitors.length - nEnabled;
   console.log(`Configured competitors: ${nEnabled}/${maxCompetitors} enabled`
@@ -96,7 +96,7 @@ async function doAdd(name, url, collection) {
   const cfg = await loadConfig();
 
   // ─── abuse guard ──────────────────────────────────────────────────────────
-  const maxCompetitors = cfg.maxCompetitors ?? 15;
+  const maxCompetitors = cfg.maxCompetitors ?? 20;
   const nEnabled = enabledCount(cfg);
   if (nEnabled >= maxCompetitors) {
     const nDisabled = cfg.competitors.length - nEnabled;
@@ -129,11 +129,14 @@ async function doAdd(name, url, collection) {
   const d = await detectTier({ name, baseUrl, collection: col }, cfg);
   console.log(`Result: ${tierLabel(d)}`);
 
-  // Assign new competitors to the catch-all weekly batch ("B") so they're picked up by a
-  // staggered batch cron from the very next run. (Batch B's cron also runs --include-ungrouped
-  // as a backstop, so even an untagged competitor is never silently skipped — but tagging it
-  // here keeps config/--list explicit.) See SKILL.md → "Weekly batches".
-  const entry = { name, baseUrl, collection: col, enabled: true, batch: 'B' };
+  // Assign new competitors to the config-declared catch-all weekly batch (cfg.defaultBatch) so
+  // they're picked up by a staggered batch cron from the very next run. (The catch-all batch's
+  // cron also runs --include-ungrouped as a backstop, so even an untagged competitor is never
+  // silently skipped — but tagging it here keeps config/--list explicit.) The fallback here
+  // ('D') exists only for a config.json missing the field entirely; since this session sets
+  // defaultBatch explicitly, that branch is currently unreachable but is kept pointed at the
+  // real catch-all rather than a stale letter. See SKILL.md → "Weekly batches".
+  const entry = { name, baseUrl, collection: col, enabled: true, batch: cfg.defaultBatch || 'D' };
   cfg.competitors.push(entry);
   cfg.lastAddAtMs = Date.now();
   await saveConfig(cfg);
@@ -185,7 +188,7 @@ async function setEnabled(name, enabled) {
     // Re-enabling must respect the same cap --add does — otherwise disable/enable cycling
     // could push the scraped-weekly count above maxCompetitors. (Its existing `batch` field,
     // if any, is untouched by disable/enable, so it lands back in the right weekly batch.)
-    const maxCompetitors = cfg.maxCompetitors ?? 15;
+    const maxCompetitors = cfg.maxCompetitors ?? 20;
     const nEnabled = enabledCount(cfg);
     if (nEnabled >= maxCompetitors) {
       console.error(`Can't enable "${c.name}" — already at the tracked-competitor limit (${nEnabled}/${maxCompetitors} enabled). Disable another competitor first.`);
