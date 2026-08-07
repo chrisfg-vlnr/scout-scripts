@@ -1022,3 +1022,78 @@ sort-integrity guard; corrected the entries above:**
   attempts across today's earlier sessions) — flagged, not silently skipped. Full detail, including
   per-competitor roster validation numbers and the baseline-impact quantification, in
   `~/Scout_GridScoping_Fix_Report_Aug5.md`.
+
+**2026-08-07 — HausOfMode baseline re-established from corrected extraction (option 1 of the
+2026-08-05 report's §7/3c options, authorized by Chris as a one-off exception):**
+- **Archived** the 4 contaminated snapshots (`hausofmode-2026-07-20.json`, `07-21`, `07-27`,
+  `08-03`) via `mv` to `~/scout-snapshot-archive-precontamination-20260807/` (outside the repo,
+  outside `data/`). Verified before/after by reading the actual filesystem, not trusting `mv`'s
+  exit code: archive holds 4 files at byte-identical sizes to the pre-move record; `data/` dropped
+  from 45 to 41 files with zero `hausofmode-*.json` remaining. Restore command (JSON files only —
+  see caveat below): `mv ~/scout-snapshot-archive-precontamination-20260807/hausofmode-*.json
+  ~/scripts/scout-competitor-tracker/data/`.
+- **Captured** a fresh baseline: `node index.js --only HausOfMode --date 2026-08-07 --no-discord`,
+  as the session's one sanctioned exception to the standing "no raw `node index.js`" rule.
+  Backgrounded via `nohup`, ~37 minutes, ~452 requests, zero 429s. Result: `catalog 13875 | ranked
+  13871 | coverage 100%`, `blocked/partial/capped/sortSuspect` all `false`, `gridScoped: true` via
+  `id="CollectionAjaxContent"`.
+- **Correction to the 2026-08-05 report's §7/§8:** that report's impact estimate assumed (and
+  explicitly flagged as INFERRED/unverified) that the ~50 Cart Drawer handles do NOT independently
+  appear in the real collection grid. **This session found the opposite: all 50 do appear in the
+  real grid**, at genuinely scattered true ranks (197 through 12180, not clustered) — confirmed by
+  sweeping the full new ranked list for all 50 known handles by name. This means the old unscoped
+  code never inflated the ranked count: `scrapeBestsellerRanks()`'s `seen`-based dedup meant each
+  of the 50 was captured exactly once, at its *artificial* early position (ranks 1-50, from the
+  cart-drawer widget sitting earlier in page byte-order) — when the crawl later reached that same
+  product's *true* position in the real grid, it was already `seen` and silently skipped. The bug
+  was a **relocation** of 50 real products to a fake top-50 block (silently displacing the genuine
+  top 50 downward by exactly 50 ranks), not an **addition** of 50 phantom rows on top of the real
+  grid. Confirms and quantifies: `rankedCount` before (13873, 2026-08-03) and after (13871,
+  2026-08-07) differ by only 2 — exactly the catalog churn over those 4 days
+  (`catalogCount` 13877 → 13875) — not by ~50, which is the arithmetic proof the total was never
+  inflated. The revised Monday forecast this corrects: the spurious-mover mechanism (now avoided)
+  would have been a uniform ~-50 rank shift for the *displaced* real products, not 50 phantom "new"
+  rows.
+- **Verification (5 independent, converging checks, full detail in the session report):** (1)
+  top-5 exact match to Chris's browser ground truth, same order; (2) all 50 known cart-drawer
+  handles found ranked at scattered true positions, none in ranks 1-50, none clustered at the tail;
+  (3) rank integrity — 1..13871 contiguous, zero gaps, zero duplicate ranks or handles; (4) a
+  mid-crawl fallback event (page 398's grid-container marker matched but scoped to empty — logged
+  as "differs from page 1's result", the only such line in the run) contributed zero new handles,
+  proven by the single log line itself (a second occurrence would have logged if the loop had
+  continued past 398 finding anything new — it didn't) and independently by the tail-correspondence
+  check below; (5) the new snapshot's last 50 ranks (13822-13871) map to the OLD snapshot's last 50
+  ranks (13824-13873) in unbroken 1:1 sequence, offset by exactly the 2-product catalog churn — an
+  injected block would show scattered or absent old ranks, and doesn't.
+- **`gridScoped: true` caveat, worth knowing for future debugging:** this field is decided from
+  *page 1 only* (`scrapeBestsellerRanks()`, lib.js ~380-384) and does not by itself guarantee every
+  later page scoped cleanly — a later page's fallback is only visible via the "differs from page
+  1's result" log line (lib.js ~385-386), not via any snapshot field. This session's tail-fallback
+  event would have been invisible to a `gridScoped`-only check; the 5-way verification above is
+  what actually confirmed cleanliness.
+- **Sheet tab:** written normally (no `--no-sheet` used) — 14034 total rows, 13875 from this run
+  (spot-checked against the local snapshot: exact rank match, e.g. `du-wirst-immer-beschutzt-sein-
+  boser-blick-halskette` reads rank 1309 in both), 159 preserved from earlier weeks (handles no
+  longer in today's catalog — pre-existing `writeCompetitorTab()` "never delete" behavior, unrelated
+  to this session). Every this-run row's Last Week Rank/WoW Change is correctly blank
+  (`hasPrior:false`, since no local prior snapshot exists post-archive). **Note for whoever opens
+  the Sheet before Monday:** the tab sorts by WoW ascending, so the 159 preserved rows (which still
+  carry concrete negative WoW values from 2026-08-03) sort *above* all 13875 of this week's
+  blank-WoW rows — stale-looking "movers" at the top of the tab. Pre-existing sort behavior, not
+  caused by this session, and does not affect Monday's Discord report (computed fresh from local
+  snapshots, which will be clean-vs-clean).
+- **Restore-gap caveat:** if anything in a future session needs to undo this, moving the 4 archived
+  JSON files back to `data/` restores the *local snapshot history* but does **not** undo the Sheet
+  tab write above — `writeCompetitorTab()` already overwrote HausOfMode's live tab. A full restore
+  needs both steps; don't assume the `mv` alone is complete.
+- **Monday 2026-08-10 (Batch B, 12:00 Manila):** HausOfMode will compare 2026-08-07 vs whatever
+  that run captures — a genuine 3-day-old baseline (not the usual weekly cadence), so expect
+  smaller WoW movements than a normal week, and expect the multi-week bonus columns (Month Change,
+  Streak, Avg Rank 4w, Hot Streak, Consistent Top 10) to be thin for this store for up to
+  `weeksToKeep` (4) weeks while clean history rebuilds. This is expected, not a bug.
+- Advisor consulted twice this session, both substantive and available: once at the mandated
+  archive checkpoint (caught the tail-fallback risk this session's verification plan would
+  otherwise have missed, and the save-gate semantics), once to reconcile a self-run count-based
+  cross-check whose naive two-branch reading conflicted with the already-gathered overlap evidence
+  (correctly resolved in favor of the direct evidence — see above). Full detail:
+  `~/Scout_HausOfMode_Recapture_Report_Aug7.md`.
