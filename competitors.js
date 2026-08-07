@@ -55,6 +55,68 @@ function enabledCount(cfg) {
   return cfg.competitors.filter(c => c.enabled).length;
 }
 
+// ─── Capacity hint on --add (2026-08-07) ────────────────────────────────────
+// Warns (never blocks) when adding a competitor would push its weekly batch past half its
+// cron timeout — the same "~50% of timeout" margin this repo's own 2026-08-07 batch
+// restructure used when sizing Batches A-D (see Batch-Restructure-Runbook.md). Silent below
+// threshold; never delays, fails, or alters --add's own cap/cooldown/batch-assignment logic.
+//
+// Throughput constant: products/minute, catalog-fetch + rank-scrape combined (end-to-end).
+// Anchored on Palantir's 2026-08-03 weekly run — a real AGGREGATE multi-store measurement,
+// matching this check's own use case (summing several competitors' snapshots), unlike a
+// single-store run: 7 competitors, 12,478 combined catalog products (rankedCount used as a
+// fallback for any JSON-blocked member — see below), measured lastDurationMs 2110259ms ≈
+// 354.8 products/min raw. Rounded down to 350 for conservatism ("assume slower than
+// measured" per instruction). Cross-checked against HausOfMode's 2026-08-07 single-store
+// current-code capture (13,871 ranked / 13,875 catalog in ~1312s ≈ 634/min, precise via
+// file birth-to-save timestamps) — NOT used as the anchor, since a lone big store with zero
+// 429s is a favorable outlier lacking the per-store setup/retry overhead a real batch carries;
+// it's ~1.8x faster than the aggregate figure, which is the expected direction for that gap.
+// The Palantir run predates its own grid-scoping port (de6f6b9, 2026-08-07) but that port only
+// changed extraction-container-scoping (validated zero output/timing change on a 4-store live
+// sample), not fetch pacing, so the duration itself isn't expected to be stale.
+// KNOWN LIMITATION: a flat products/constant model does not match this repo's own page-based
+// planning figures at the extremes (under-predicts Batch A: 19,687 products → ~56 min modeled
+// vs 65-78 min planned; over-predicts Batch D: 13,976 → ~40 min modeled vs 9-19 min planned)
+// because products-per-rank-page varies ~3x across the roster (HausOfMode ≈35/page vs
+// CristalliSchwiiz ≈12/page under its maxRankPages:2000 override) — page count, not raw
+// product count, is the real cost driver. Not fixed here; the count/constant shape is fixed by
+// this feature's design. MUST be re-derived once Monday 2026-08-10 gives real batch-level
+// lastDurationMs numbers for all four batches.
+const CAPACITY_HINT_PRODUCTS_PER_MINUTE = 350;
+
+// timeoutSeconds lives in each OpenClaw cron job, not in config.json — there's no safe way to
+// read it live from --add without an extra gateway round-trip inside a path B5 requires to
+// never fail. Mirrors the 4 batch cron jobs' real values as read fresh via `openclaw cron get`
+// on 2026-08-07 (Batch-Restructure-Runbook.md). Update this if those jobs' timeouts change.
+const BATCH_TIMEOUT_SECONDS = { A: 10800, B: 7200, C: 7200, D: 7200 };
+
+// Estimates the target batch's total projected runtime (existing enabled members + the
+// competitor just added, using its real just-captured baseline count) and returns a single
+// warning line if it exceeds 50% of that batch's cron timeout, else null. Every failure mode
+// (missing snapshot, unparsable file, a batch with no timeout entry, division edge cases) is
+// handled by returning null rather than throwing — the caller also wraps this in try/catch as
+// a second layer, since a capacity hint must never be able to break a live --add.
+async function capacityHintLine(cfg, newEntry, newSnapshot) {
+  const batch = newEntry.batch;
+  const timeoutSeconds = BATCH_TIMEOUT_SECONDS[batch];
+  if (!timeoutSeconds) return null;
+
+  let totalProducts = newSnapshot.catalogCount || newSnapshot.rankedCount || 0;
+  const members = cfg.competitors.filter(c => c.enabled && c.batch === batch && c.name !== newEntry.name);
+  for (const m of members) {
+    const snaps = await loadSnapshots(m.name);
+    if (!snaps.length) continue;
+    const s = snaps[0];
+    totalProducts += s.catalogCount || s.rankedCount || 0;
+  }
+
+  const estimatedMinutes = totalProducts / CAPACITY_HINT_PRODUCTS_PER_MINUTE;
+  const budgetMinutes = (timeoutSeconds / 2) / 60;
+  if (estimatedMinutes <= budgetMinutes) return null;
+  return `⚠️ Batch ${batch} now projected at ~${Math.round(estimatedMinutes)} min vs a ${Math.round(budgetMinutes)} min budget — Chris may want to rebalance batches.`;
+}
+
 function tierLabel(d) {
   if (d.blocked) return `⛔ ${d.tier}  (JSON: ${d.jsonErr || 'fail'} | HTML: ${d.htmlErr || 'fail'})`;
   const bits = [];
@@ -163,6 +225,11 @@ async function doAdd(name, url, collection) {
   }
   await saveSnapshot(snapshot, entry);
   console.log(`✔ Baseline snapshot saved (${date}): ${snapshot.tier}, catalog ${snapshot.catalogCount}, ranked ${snapshot.rankedCount}, coverage ${Math.round(snapshot.coverage * 100)}%. WoW change will be available on the next weekly run.`);
+
+  try {
+    const hint = await capacityHintLine(cfg, entry, snapshot);
+    if (hint) console.log(hint);
+  } catch { /* capacity hint is a nudge, never allowed to affect --add's own outcome */ }
 
   // Write the baseline straight to the Sheet too — not just local disk. Without this, the
   // Sheet tab doesn't exist until the next successful weekly index.js run, which can make

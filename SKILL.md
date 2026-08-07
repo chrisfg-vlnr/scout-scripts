@@ -278,6 +278,21 @@ untrusted channel shouldn't be able to trigger unbounded fetches against arbitra
 the VPS. Numbers are conservative defaults, not tuned; adjust in `config.json` if they're wrong
 in practice.
 
+### Capacity hint on `--add` (2026-08-07)
+
+After a successful baseline capture, `--add` silently checks whether the new competitor's target
+batch (its `batch` field) is now projected to exceed **50% of that batch's cron `timeoutSeconds`**
+— the same margin this repo's own 2026-08-07 batch restructure used to size Batches A–D. Below
+threshold: no output at all. Above threshold: one extra line appended to the normal confirmation
+(e.g. `⚠️ Batch D now projected at ~83 min vs a 60 min budget...`) — this line is visible in the
+external Discord `--add` confirmation, by design, since it fires rarely. Throughput constant
+(`CAPACITY_HINT_PRODUCTS_PER_MINUTE = 350`, in `competitors.js`) and the per-batch timeout map are
+documented in-code with full derivation; **must be re-derived once Monday 2026-08-10 gives real
+batch-level `lastDurationMs` numbers.** The whole check is wrapped in try/catch — any failure
+(missing snapshot, corrupt file, unknown batch) is swallowed and `--add` completes exactly as
+before. This is a nudge, not a gate — it never blocks, delays, or fails an add, and it does not
+touch the cap/cooldown/batch-assignment logic above.
+
 ## Discord report
 
 One header message (date, competitor count, sheet link), then one message per competitor
