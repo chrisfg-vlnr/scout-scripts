@@ -212,16 +212,37 @@ function selectPrice(product) {
   return Number.isFinite(n) ? n : null;
 }
 
-// Returns { ok, blocked, products:[{handle,title,productType,id,url,price}], error }
+// Shopify refuses to paginate `products.json` past page x limit = 25,000 objects, answering
+// HTTP 400 with its own error text (confirmed live 2026-08-17 on RedlichBecker at page 101 of
+// limit=250, and documented at shopify.dev/docs/api/usage/limits as a platform-wide pagination
+// ceiling). This is a NORMAL TERMINAL CONDITION — the end of what the endpoint will serve — not
+// a block, not a rate limit, not a WAF, and not merchant-specific. Before 2026-08-21 the
+// catch-all below filed it as `blocked`; see buildSnapshot() for why that mattered so much.
+// Matching on Shopify's literal text is deliberately narrow: if the wording ever changes we
+// fall back to the old blocked -> partial -> not-saved path, which is safe. The failure mode of
+// a loose match — mistaking a real 400 for a ceiling — is the unsafe direction, so we don't.
+const CATALOG_PAGE_CEILING_RE = /Page \s*\*\s*Limit exceeds the (\d+) limit/i;
+
+// Returns { ok, blocked, truncated, truncatedAt, products:[{handle,title,productType,id,url,price}], error }
 export async function fetchCatalog(competitor, cfg) {
   const base = competitor.baseUrl.replace(/\/+$/, '');
   const col  = competitor.collection || 'all';
   const byHandle = new Map();
   let page = 1, blocked = false, error = null;
+  let truncated = false, truncatedAt = null;
 
   while (page <= cfg.fetch.maxPagesSafety) {
     const url = `${base}/collections/${col}/products.json?limit=250&page=${page}`;
     const r = await politeFetch(url, cfg, { accept: 'application/json' });
+    // Checked BEFORE the blocked catch-all below, which would otherwise swallow this 400.
+    const ceiling = r.status === 400 ? CATALOG_PAGE_CEILING_RE.exec(r.text || '') : null;
+    if (ceiling) {
+      truncated = true;
+      truncatedAt = Number(ceiling[1]) || null;
+      error = `catalog truncated at ${byHandle.size} products by Shopify's ${truncatedAt ?? '25000'}-product pagination ceiling — this store has MORE than that and the rest cannot be enumerated through this endpoint`;
+      console.error(`    [${competitor.name}] catalog page ${page}: Shopify's ${truncatedAt ?? '25000'}-product pagination ceiling reached — catalogue is TRUNCATED at ${byHandle.size} products, not complete.`);
+      break;
+    }
     if (r.status === 403 || r.status === 409 || r.status === 401 || r.status === 430 || (!r.ok && r.status !== 404)) {
       blocked = true; error = r.error || `HTTP ${r.status}`; break;
     }
@@ -256,7 +277,7 @@ export async function fetchCatalog(competitor, cfg) {
     page++;
     if (page % 5 === 0) console.error(`    [${competitor.name}] catalog page ${page}, ${byHandle.size} products so far...`);
   }
-  return { ok: byHandle.size > 0 && !blocked, blocked, products: [...byHandle.values()], error };
+  return { ok: byHandle.size > 0 && !blocked, blocked, truncated, truncatedAt, products: [...byHandle.values()], error };
 }
 
 // ─── HTML best-selling rank scrape (the ONLY real rank source) ─────────────────
@@ -550,6 +571,13 @@ export async function buildSnapshot(competitor, cfg, date) {
     partial: false,
     capped: false,
     cappedAt: null,
+    // Shopify's products.json pagination ceiling cut the catalogue off (see fetchCatalog).
+    // The membership list is incomplete BY CONSTRUCTION and can never be completed through
+    // this endpoint, so catalogCount is a FLOOR, not the store's size, and `coverage` is
+    // computed against a truncated denominator. Gated out of baseline persistence by
+    // isIncomplete() — see the comment there for why this is not `capped`.
+    catalogTruncated: false,
+    catalogTruncatedAt: null,
     sortSuspect: false,
     sortSuspectStats: null,
     error: null,
@@ -626,7 +654,23 @@ export async function buildSnapshot(competitor, cfg, date) {
   const partialNotes = [];
   if (ranks.partial) partialNotes.push(`rank scrape: ${ranks.error} — ${ranks.handles.length} ranked before stopping`);
   if (catalog.blocked) partialNotes.push(`catalog fetch: ${catalog.error || 'blocked'}`);
-  if (partialNotes.length) {
+  if (catalog.truncated) {
+    // CHECKED FIRST, AND DELIBERATELY SO. Before 2026-08-21 the ceiling 400 was filed as
+    // `blocked` by fetchCatalog, which forced this store down the `partial` arm and discarded
+    // the snapshot — the right OUTCOME for the wrong stated REASON. Now that `blocked` is
+    // correctly false, the naive consequence would be to fall through to `capped` below, whose
+    // Discord line asserts "the full catalog IS captured" (index.js). That statement is FALSE
+    // for a catalogue Shopify truncated, and the saved snapshot would become a membership list
+    // missing an unknown number of products — which mislabels them as "Removed From Store" /
+    // "New This Week" forever after. That is exactly what the never-save rule exists to prevent
+    // (primer S9), and it is precisely why `capped` IS savable: primer S12 is explicit that
+    // capped is safe to save BECAUSE the catalog fetch is complete. Here it is not, and never
+    // can be. So: own state, never saved, and it says so in words.
+    out.catalogTruncated = true;
+    out.catalogTruncatedAt = catalog.truncatedAt;
+    out.tier += ` — CATALOG TRUNCATED (Shopify's ${catalog.truncatedAt ?? 25000}-product pagination ceiling)`;
+    out.error = [catalog.error, ...partialNotes].filter(Boolean).join(' | ');
+  } else if (partialNotes.length) {
     out.partial = true;
     out.tier += ' — PARTIAL (incomplete crawl)';
     out.error = partialNotes.join(' | ');
@@ -656,7 +700,7 @@ export async function buildSnapshot(competitor, cfg, date) {
   //   (ii) detectAlphabeticalSort — the recorded order itself correlates with alphabetical
   //        (mechanism-agnostic backstop; this is the one that actually caught HausOfMode, since
   //        that incident turned out to be a silently-ignored sort_by, not a redirect)
-  if (!out.blocked && !out.partial) {
+  if (!out.blocked && !out.partial && !out.catalogTruncated) {
     const sortCheck = detectAlphabeticalSort(out.products, competitor.baseUrl);
     const reasons = [];
     if (ranks.urlIntegrityFail) reasons.push(ranks.urlIntegrityDetail);
@@ -676,6 +720,40 @@ export async function buildSnapshot(competitor, cfg, date) {
   }
 
   return out;
+}
+
+// ─── baseline-persistence gate (SINGLE SOURCE OF TRUTH) ───────────────────────
+// Never persist an incomplete snapshot as this week's trusted baseline. Comparison must always
+// baseline against the last COMPLETE, TRUSTED week, because every one of these states would
+// corrupt next week's diff in a way nothing about a saved snapshot's shape would reveal:
+//   blocked         — empty catalog; next week's whole catalog reads "New This Week".
+//   partial         — a mid-crawl wall; every not-yet-reached product reads "Removed From
+//                     Store" the moment a future run reaches further.
+//   catalogTruncated— Shopify's pagination ceiling cut the membership list off at 25,000 (see
+//                     buildSnapshot). Same mislabeling as `partial`, permanently, and it is
+//                     specifically NOT `capped`: capped is savable only because a capped run's
+//                     CATALOG is complete and only its RANK depth is cut (primer S12).
+//   closed          — merchant has the storefront password-gated; there is nothing to save.
+//   sortSuspect     — coverage-complete but believed MISORDERED (alphabetical, not sales-
+//                     ranked); saving it replaces a known-good rank baseline with noise that
+//                     looks exactly like real data. Chris's explicit call 2026-08-05.
+// Extracted to lib.js 2026-08-21: index.js and competitors.js --add each carried their OWN copy
+// of this expression and they had already drifted — competitors.js checked only
+// `blocked || partial`, so a --add whose baseline came back sort-suspect saved it anyway. One
+// predicate, both call sites, no drift.
+export function isIncomplete(snapshot) {
+  return !!(snapshot.blocked || snapshot.partial || snapshot.catalogTruncated
+            || snapshot.closed || snapshot.sortSuspect);
+}
+
+// Short label for the incomplete state, for logs / Sheet markers / report routing.
+export function incompleteLabel(snapshot) {
+  if (snapshot.blocked) return 'BLOCKED';
+  if (snapshot.closed) return 'CLOSED';
+  if (snapshot.catalogTruncated) return 'CATALOG-TRUNCATED';
+  if (snapshot.sortSuspect) return 'SORT-SUSPECT';
+  if (snapshot.partial) return 'PARTIAL';
+  return null;
 }
 
 // ─── snapshot persistence ──────────────────────────────────────────────────────

@@ -27,7 +27,7 @@
 
 import {
   loadConfig, saveConfig, slug, findCompetitor, normalizeBaseUrl,
-  detectTier, loadSnapshots, buildSnapshot, saveSnapshot, computeMetrics,
+  detectTier, loadSnapshots, buildSnapshot, saveSnapshot, computeMetrics, isIncomplete, incompleteLabel,
   getSheetsClient, writeCompetitorTab,
 } from './lib.js';
 
@@ -218,9 +218,20 @@ async function doAdd(name, url, collection) {
   console.log(`\nCapturing baseline snapshot for "${name}"...`);
   const date = localDate(cfg.reportTz || 'Asia/Manila');
   const snapshot = await buildSnapshot(entry, cfg, date);
-  if (snapshot.blocked || snapshot.partial) {
-    const label = snapshot.blocked ? 'blocked' : 'partial (a mid-crawl wall stopped it early)';
-    console.log(`⚠️  Baseline snapshot ${label} (${snapshot.error || label}) — no baseline saved. It'll get its first snapshot on the next weekly run instead.`);
+  // Same baseline-persistence gate as the weekly run — one shared predicate, see
+  // isIncomplete() in lib.js. This path used to carry its own `blocked || partial` copy, which
+  // had already drifted out of sync with index.js (it never checked `sortSuspect`, so a --add
+  // whose baseline came back alphabetical-looking saved it anyway) and would have silently
+  // saved a Shopify-ceiling-truncated or password-gated baseline too.
+  if (isIncomplete(snapshot)) {
+    const reason = {
+      BLOCKED: 'blocked',
+      CLOSED: 'the store is password-protected (closed to visitors) — nothing to capture',
+      'CATALOG-TRUNCATED': `too large to list — this store has more than ${(snapshot.catalogTruncatedAt ?? 25000).toLocaleString('en-US')} products and Shopify will not paginate past that`,
+      'SORT-SUSPECT': 'sort-suspect (the recorded order looks alphabetical, not sales-ranked)',
+      PARTIAL: 'partial (a mid-crawl wall stopped it early)',
+    }[incompleteLabel(snapshot)];
+    console.log(`⚠️  Baseline snapshot ${reason} (${snapshot.error || reason}) — no baseline saved. It'll get its first snapshot on the next weekly run instead.`);
     return;
   }
   await saveSnapshot(snapshot, entry);

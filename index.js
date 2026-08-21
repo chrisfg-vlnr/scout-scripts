@@ -11,7 +11,7 @@
 import fs from 'node:fs/promises';
 import {
   loadConfig, slug, buildSnapshot, saveSnapshot, loadSnapshots, pruneSnapshots,
-  computeMetrics, ROOT, getSheetsClient, writeCompetitorTab,
+  computeMetrics, ROOT, getSheetsClient, writeCompetitorTab, isIncomplete, incompleteLabel,
 } from './lib.js';
 
 // ─── args ──────────────────────────────────────────────────────────────────────
@@ -157,6 +157,16 @@ function buildCompetitorReport(summary, prettyDate) {
   if (summary.blocked) {
     return `⚠️ **${name}** — BLOCKED this week (${summary.tier}). No data. Manual check recommended.`;
   }
+  if (summary.catalogTruncated) {
+    const ceiling = summary.catalogTruncatedAt ?? 25000;
+    return `⚠️ **${name}** — CATALOG TOO LARGE TO ENUMERATE this week (${summary.tier}). This store now has `
+      + `**more than ${ceiling.toLocaleString('en-US')} products** — Shopify refuses to paginate its product list past `
+      + `${ceiling.toLocaleString('en-US')}, so we can see ${(summary.catalogCount ?? 0).toLocaleString('en-US')} of them and there is no way to `
+      + `retrieve the rest. Coverage figures would be measured against that truncated list, so none are shown. `
+      + `Not saved as this week's baseline — an incomplete product list would wrongly report the products we cannot `
+      + `see as "Removed From Store" next week. This is a limit of Shopify's public catalog, not a fault at the store `
+      + `or in the tracker. Rank tracking for this store needs a different approach — flag it to Chris.`;
+  }
   if (summary.sortSuspect) {
     const st = summary.sortSuspectStats;
     const stStr = st ? ` (ρ=${st.rho == null ? 'n/a' : st.rho.toFixed(2)}, n=${st.n}${st.urlIntegrityFail ? ', redirect dropped sort_by' : ''})` : '';
@@ -251,17 +261,9 @@ async function run(args) {
       const snapshot = await buildSnapshot(comp, cfg, date);
       console.log(`  ${snapshot.tier} | catalog ${snapshot.catalogCount} | ranked ${snapshot.rankedCount} | coverage ${(snapshot.coverage * 100).toFixed(0)}%${snapshot.error ? ' | ' + snapshot.error : ''}`);
 
-      // Never persist a blocked, partial, OR sort-suspect snapshot as this week's baseline. A
-      // blocked (empty) catalog would mislabel next week's whole catalog as "New This Week"; a
-      // partial one (a mid-crawl wall stopped the rank scrape or catalog fetch early) would just
-      // as wrongly mislabel every not-yet-reached product as "Removed From Store" the moment a
-      // future run reaches further. sort-suspect (added 2026-08-05 — see primer) is coverage-
-      // complete but believed MISORDERED (looks alphabetical, not sales-ranked): saving it would
-      // silently replace a known-good rank baseline with alphabetical noise that looks exactly
-      // like real data — worse than the other two, since nothing about a saved snapshot's shape
-      // reveals it's wrong. Comparison should always baseline against the last COMPLETE, TRUSTED
-      // week.
-      const incomplete = snapshot.blocked || snapshot.partial || snapshot.sortSuspect;
+      // Baseline-persistence gate. The full rationale for every state it covers, and why this
+      // is one shared predicate rather than a copy here, lives at isIncomplete() in lib.js.
+      const incomplete = isIncomplete(snapshot);
       if (!args.noSave && !incomplete) { await saveSnapshot(snapshot, comp); }
       if (!args.noSave && !args.noPrune) {
         const pruned = await pruneSnapshots(comp.name, cfg.weeksToKeep);
@@ -271,13 +273,14 @@ async function run(args) {
       if (incomplete) {
         summary = {
           competitor: comp.name, blocked: snapshot.blocked, partial: snapshot.partial,
+          catalogTruncated: snapshot.catalogTruncated, catalogTruncatedAt: snapshot.catalogTruncatedAt,
           sortSuspect: snapshot.sortSuspect, sortSuspectStats: snapshot.sortSuspectStats,
           tier: snapshot.tier, error: snapshot.error,
           catalogCount: snapshot.catalogCount, rankedCount: snapshot.rankedCount,
         };
         // Mark it visibly in the Sheet too. Preserves any existing product rows from prior
         // good weeks; upserts one marker row keyed on a stable handle.
-        const label = snapshot.blocked ? 'BLOCKED' : snapshot.sortSuspect ? 'SORT-SUSPECT' : 'PARTIAL';
+        const label = incompleteLabel(snapshot);
         console.log(`  ${label} — flagged in report${sheets ? ' + Sheet marker' : ''} (snapshot not saved).`);
         if (sheets) {
           // price: always null — a marker row has no product data, real or otherwise.
@@ -289,6 +292,15 @@ async function run(args) {
             url: comp.baseUrl, productType: '',
             lastRank: null, thisRank: null, wow: null,
             status: 'Blocked',
+            wk2Rank: null, wk3Rank: null, monthChange: null, streak: null, avgRank: null,
+            hotStreak: null, spike: null, consistentTop10: null,
+            price: null, currency: comp.currency ?? null,
+          } : snapshot.catalogTruncated ? {
+            handle: '__catalog_truncated__',
+            title: `⚠️ CATALOG TOO LARGE — this store has more than ${(snapshot.catalogTruncatedAt ?? 25000).toLocaleString('en-US')} products and Shopify will not paginate past that, so only ${snapshot.catalogCount.toLocaleString('en-US')} could be listed and the rest cannot be retrieved; not saved as this week's baseline. Not a fault at the store or in the tracker.`,
+            url: comp.baseUrl, productType: '',
+            lastRank: null, thisRank: null, wow: null,
+            status: 'CatalogTruncated',
             wk2Rank: null, wk3Rank: null, monthChange: null, streak: null, avgRank: null,
             hotStreak: null, spike: null, consistentTop10: null,
             price: null, currency: comp.currency ?? null,
@@ -322,6 +334,7 @@ async function run(args) {
         summary = sm;
         summary.blocked = false;
         summary.partial = false;
+        summary.catalogTruncated = false;
         // `capped` (rank scrape hit the page budget while still productive) is real, complete-
         // catalog data — saved as baseline like a normal week, but surfaced so the report says
         // "capped at page N" rather than passing as full coverage.
