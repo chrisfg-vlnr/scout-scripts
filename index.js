@@ -157,6 +157,13 @@ function buildCompetitorReport(summary, prettyDate) {
   if (summary.blocked) {
     return `⚠️ **${name}** — BLOCKED this week (${summary.tier}). No data. Manual check recommended.`;
   }
+  if (summary.closed) {
+    return `🔒 **${name}** — STORE CLOSED this week (${summary.tier}). The store is behind Shopify's `
+      + `password page: every visitor is redirected to /password, so there is no public catalog to read. `
+      + `This is a change at the store, not a problem with the tracker — it usually means a rebrand, a `
+      + `migration or a seasonal close, and it is often temporary. Nothing was saved for this week and the `
+      + `store's history is untouched; tracking resumes automatically if it reopens.`;
+  }
   if (summary.catalogTruncated) {
     const ceiling = summary.catalogTruncatedAt ?? 25000;
     return `⚠️ **${name}** — CATALOG TOO LARGE TO ENUMERATE this week (${summary.tier}). This store now has `
@@ -274,6 +281,7 @@ async function run(args) {
         summary = {
           competitor: comp.name, blocked: snapshot.blocked, partial: snapshot.partial,
           catalogTruncated: snapshot.catalogTruncated, catalogTruncatedAt: snapshot.catalogTruncatedAt,
+          closed: snapshot.closed,
           sortSuspect: snapshot.sortSuspect, sortSuspectStats: snapshot.sortSuspectStats,
           tier: snapshot.tier, error: snapshot.error,
           catalogCount: snapshot.catalogCount, rankedCount: snapshot.rankedCount,
@@ -292,6 +300,15 @@ async function run(args) {
             url: comp.baseUrl, productType: '',
             lastRank: null, thisRank: null, wow: null,
             status: 'Blocked',
+            wk2Rank: null, wk3Rank: null, monthChange: null, streak: null, avgRank: null,
+            hotStreak: null, spike: null, consistentTop10: null,
+            price: null, currency: comp.currency ?? null,
+          } : snapshot.closed ? {
+            handle: '__closed__',
+            title: `🔒 CLOSED — the store is behind Shopify's password page this week (no public catalog to read); a change at the store, not a tracker fault. History untouched; tracking resumes if it reopens.`,
+            url: comp.baseUrl, productType: '',
+            lastRank: null, thisRank: null, wow: null,
+            status: 'Closed',
             wk2Rank: null, wk3Rank: null, monthChange: null, streak: null, avgRank: null,
             hotStreak: null, spike: null, consistentTop10: null,
             price: null, currency: comp.currency ?? null,
@@ -335,6 +352,7 @@ async function run(args) {
         summary.blocked = false;
         summary.partial = false;
         summary.catalogTruncated = false;
+        summary.closed = false;
         // `capped` (rank scrape hit the page budget while still productive) is real, complete-
         // catalog data — saved as baseline like a normal week, but surfaced so the report says
         // "capped at page N" rather than passing as full coverage.

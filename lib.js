@@ -289,6 +289,13 @@ export async function fetchCatalog(competitor, cfg) {
 // concrete non-ok status (e.g. 404) past page 1 still breaks immediately and is unaffected.
 const RANK_EMPTY_PAGE_TOLERANCE = 3;
 
+// Shopify's storefront password gate always lands on the store's own /password path.
+// Path-exact on purpose: a product legitimately handled `…/products/password-reset` must not
+// trip this, and neither must a query string that merely mentions the word.
+function isPasswordGateUrl(u) {
+  try { return /^\/password\/?$/.test(new URL(u).pathname); } catch { return false; }
+}
+
 const HREF_PRODUCT_RE = /href="[^"]*?\/products\/([a-z0-9][a-z0-9\-_%]*)(?:[?#][^"]*)?"/gi;
 
 // Candidate container markers for the real collection-grid section, tried in order. Themes vary
@@ -375,6 +382,13 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
   // NOT cover a 200-with-sort_by-silently-ignored response (no redirect at all) — that's what
   // detectAlphabeticalSort() in buildSnapshot() is for.
   let urlIntegrityFail = false, urlIntegrityDetail = null;
+  // passwordGated: the storefront is behind Shopify's password gate — every request is
+  // redirected to /password. A MERCHANT STATE (store closed to visitors: rebrand, seasonal
+  // close, migration), not a block on us and not a scrape failure. Distinguished from a real
+  // block by the redirect target: a WAF or IP block returns a challenge or an error page, not
+  // a 302 to the store's own /password. Confirmed 2026-08-17 on BreuerMode, including a
+  // plain-curl-UA control that behaved identically — i.e. the store is closed to EVERYONE.
+  let passwordGated = false;
   // Grid-scoping visibility (2026-08-05 fix): decided from page 1 and logged once per
   // competitor per run, rather than per page, since 300+ pages would otherwise flood the log —
   // silent fallback is exactly how the original cart-drawer-contamination bug went unnoticed.
@@ -383,6 +397,12 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
   while (page <= cap) {
     const url = `${base}/collections/${col}?sort_by=best-selling&page=${page}`;
     const r = await politeFetch(url, cfg, { accept: 'text/html' });
+    if (r.hops > 0 && r.finalUrl && isPasswordGateUrl(r.finalUrl)) {
+      passwordGated = true;
+      error = `store is password-protected (closed to visitors) — ${url} redirected to ${r.finalUrl}`;
+      console.error(`    [${competitor.name}] password gate: ${error}`);
+      break;
+    }
     if (!urlIntegrityFail && r.hops > 0 && r.finalUrl && !/[?&]sort_by=/.test(r.finalUrl)) {
       urlIntegrityFail = true;
       urlIntegrityDetail = `redirected away from the requested sort (${r.hops} hop(s)): ${url} -> ${r.finalUrl}`;
@@ -452,7 +472,7 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
     capped = true;
     error = `rank scrape hit the ${cap}-page cap while still finding new products — coverage incomplete (raise this store's maxRankPages)`;
   }
-  return { ok: ranked.length > 0 && !blocked, blocked, partial, capped, cap, handles: ranked, pages: page - 1, error, urlIntegrityFail, urlIntegrityDetail, gridScoped: gridScopeOk, gridScopeMarker };
+  return { ok: ranked.length > 0 && !blocked, blocked, partial, capped, cap, passwordGated, handles: ranked, pages: page - 1, error, urlIntegrityFail, urlIntegrityDetail, gridScoped: gridScopeOk, gridScopeMarker };
 }
 
 // ─── sort-integrity check (alphabetical-fallback detector) ────────────────────
@@ -600,6 +620,9 @@ export async function buildSnapshot(competitor, cfg, date) {
     // isIncomplete() — see the comment there for why this is not `capped`.
     catalogTruncated: false,
     catalogTruncatedAt: null,
+    // The merchant has the storefront behind Shopify's password gate: every request is
+    // redirected to /password. A merchant state, not a scrape failure and not a block on us.
+    closed: false,
     sortSuspect: false,
     sortSuspectStats: null,
     error: null,
@@ -621,6 +644,21 @@ export async function buildSnapshot(competitor, cfg, date) {
   const ranks   = await scrapeBestsellerRanks(competitor, cfg);
   out.gridScoped = ranks.gridScoped;
   out.gridScopeMarker = ranks.gridScopeMarker;
+
+  // Checked before the blocked case: a password-gated store produces block-SHAPED symptoms
+  // (products.json 401, no rank data) but is not a block on us at all, and reporting it as one
+  // reads to the external team as a Scout defect rather than as news about a competitor.
+  if (ranks.passwordGated) {
+    out.tier = 'Tier 3 (Closed — password-protected)';
+    out.closed = true;
+    out.error = ranks.error || 'store is password-protected (closed to visitors)';
+    // Report whatever the catalog fetch managed before the gate was seen. Normally 0 (a closed
+    // store 401s products.json too), but a merchant who flips the gate on mid-run leaves a real
+    // catalog behind, and logging `catalog 0` for it would be a second wrong statement on top of
+    // the one this branch exists to fix. Not saved either way — see isIncomplete().
+    out.catalogCount = catalog.products.length;
+    return out;
+  }
 
   if (catalog.blocked && ranks.blocked) {
     out.tier = 'Tier 3 (Blocked)';
@@ -666,8 +704,11 @@ export async function buildSnapshot(competitor, cfg, date) {
   out.catalogCount = catalog.products.length;
   out.rankedCount  = rankMap.size;
   out.coverage     = out.catalogCount > 0 ? out.rankedCount / out.catalogCount : (out.rankedCount > 0 ? 1 : 0);
+  // The `!ranks.ok` arm used to hardcode 'Tier 2-partial (catalog only, no rank)' even when
+  // there was no catalog either — BreuerMode's 2026-08-17 run reported exactly that alongside
+  // `catalog 0`, a self-contradicting label. Cosmetic only (no data impact), fixed 2026-08-21.
   out.tier = ranks.ok ? (catalog.ok ? 'Tier 1+2 (JSON catalog + HTML rank)' : 'Tier 2 (HTML rank only)')
-                      : 'Tier 2-partial (catalog only, no rank)';
+                      : (catalog.ok ? 'Tier 2-partial (catalog only, no rank)' : 'Tier 0 (no catalog, no rank)');
 
   // A mid-crawl wall on the rank scrape, and/or a blocked catalog fetch, both mean this
   // snapshot is real but INCOMPLETE — distinct from the "no usable data at all" Tier 3 case
