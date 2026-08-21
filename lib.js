@@ -282,6 +282,13 @@ export async function fetchCatalog(competitor, cfg) {
 
 // ─── HTML best-selling rank scrape (the ONLY real rank source) ─────────────────
 
+// Consecutive zero-new-handle pages required before the rank crawl calls it the end of the
+// catalogue. 3, not 1: one glitched or duplicate page must not be able to truncate a crawl
+// (see the break site below for the RedlichBecker evidence), while 3 in a row is not a
+// plausible transient. Costs 2 extra page fetches per store per run at a genuine end — a
+// concrete non-ok status (e.g. 404) past page 1 still breaks immediately and is unaffected.
+const RANK_EMPTY_PAGE_TOLERANCE = 3;
+
 const HREF_PRODUCT_RE = /href="[^"]*?\/products\/([a-z0-9][a-z0-9\-_%]*)(?:[?#][^"]*)?"/gi;
 
 // Candidate container markers for the real collection-grid section, tried in order. Themes vary
@@ -412,21 +419,36 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
       seen.add(h); ranked.push(h); added++;
     }
     // End-of-catalog detection: a page with no NEW grid products (Shopify repeats last page
-    // or serves an empty grid past the end).
+    // or serves an empty grid past the end). Tolerance raised from 1 to
+    // RANK_EMPTY_PAGE_TOLERANCE consecutive such pages on 2026-08-21: breaking on the FIRST
+    // one silently truncated whole crawls, and did so invisibly. Proven false positive —
+    // RedlichBecker stopped at ~page 697 on 2026-08-10, yet page 960 still served 28 products
+    // and linked on to 961 (probe P6, 2026-08-17 diagnosis). A single transient duplicate or
+    // glitched page was indistinguishable from a real end of catalogue, and nothing in the run
+    // output revealed which had happened. The page index and handle counts are now logged on
+    // every empty page precisely so the next occurrence is diagnosable rather than inferred.
     if (added === 0) {
       emptyOrDupPages++;
-      if (emptyOrDupPages >= 1) break;
+      console.error(`    [${competitor.name}] rank scrape page ${page}: 0 new handles (${pageHandles.length} on page, ${ranked.length} ranked so far) — empty/duplicate page ${emptyOrDupPages}/${RANK_EMPTY_PAGE_TOLERANCE}.`);
+      if (emptyOrDupPages >= RANK_EMPTY_PAGE_TOLERANCE) {
+        console.error(`    [${competitor.name}] rank scrape: ${RANK_EMPTY_PAGE_TOLERANCE} consecutive empty/duplicate pages ending at page ${page} — treating as end of catalog at ${ranked.length} ranked.`);
+        break;
+      }
     } else {
       emptyOrDupPages = 0;
     }
     page++;
     if (page % 25 === 0) console.error(`    [${competitor.name}] rank scrape page ${page}, ${ranked.length} ranked so far...`);
   }
-  // Exited via the `while (page <= cap)` condition rather than any break above — the only way
-  // `page` exceeds `cap` is a productive final page (an empty/duplicate page breaks first, with
-  // `page` unincremented). So this is unambiguously "cut off by the page budget while still
-  // finding products," not a clean end.
-  if (!blocked && !partial && page > cap) {
+  // Exited via the `while (page <= cap)` condition rather than any break above.
+  // `emptyOrDupPages === 0` is LOAD-BEARING as of 2026-08-21. It used to be implied: with a
+  // tolerance of 1, an empty page always broke immediately with `page` unincremented, so
+  // `page > cap` could only mean a productive final page. Raising the tolerance destroys that
+  // invariant — a store whose genuine catalogue ends within RANK_EMPTY_PAGE_TOLERANCE-1 pages
+  // of its cap now increments past the cap while burning its empty-page allowance, and would
+  // be reported as `capped` ("raise this store's page cap") when it had in fact finished
+  // cleanly. Requiring the last page to have been productive restores the original meaning.
+  if (!blocked && !partial && page > cap && emptyOrDupPages === 0) {
     capped = true;
     error = `rank scrape hit the ${cap}-page cap while still finding new products — coverage incomplete (raise this store's maxRankPages)`;
   }
