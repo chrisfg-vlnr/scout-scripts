@@ -373,7 +373,41 @@ for any competitor that never redirects. See the Primer's 2026-08-05 Execution L
    further. (Fixed 2026-07-17 — see the Primer's Execution Log. Before this fix, a mid-crawl wall
    was silently indistinguishable from Shopify signaling "no more pages," so a wall-hit crawl was
    reported as a complete, trustworthy week with no error surfaced anywhere.)
-5. **Sort-suspect** (added 2026-08-05 — see the Primer's Execution Log): coverage is complete —
+5. **Capped** (added 2026-07-21): the rank crawl ran its entire page budget with the last page
+   still productive — real, deterministic top-N rank data, but not full rank coverage. Unlike
+   every other flagged state in this list, a capped snapshot **IS saved** as the baseline, and
+   the reason is narrow and load-bearing: a capped run's **catalog fetch is complete**, so the
+   membership list is authoritative and there is no removed/new mislabeling risk — only the rank
+   depth is cut. The Discord line says so explicitly ("the full catalog IS captured"). Any state
+   where the *catalog* is incomplete must therefore never be routed through `capped` — see
+   Catalog-truncated below, which exists precisely because it otherwise would have been.
+6. **Catalog-truncated** (added 2026-08-21): the store has more products than Shopify will
+   paginate. `products.json` refuses `page × limit > 25,000` and answers HTTP 400 with its own
+   text (`Page * Limit exceeds the 25000 limit`); at `limit=250`, page 100 is the last legal
+   page. This is a normal terminal condition — not a block, not a rate limit, not merchant-
+   specific — and any store crossing 25,000 products hits it. Before this was recognised,
+   `fetchCatalog()`'s non-OK catch-all filed it as `blocked`, so the store was reported as
+   blocked-then-partial and discarded. It is now its own state: `catalogTruncated`, checked
+   **before** `capped` in `buildSnapshot()`, flagged in Discord and via a
+   `__catalog_truncated__` Sheet marker, and **not saved**. The saved-`catalog` count is a
+   FLOOR, not the store's size, so coverage percentages for such a store are meaningless and the
+   report deliberately shows none. Recognising the 400 without giving it its own state is a trap,
+   not a shortcut: it makes `blocked` false, the run falls through to `capped`, and the snapshot
+   then saves while asserting the full catalog was captured — a truncated membership list that
+   mislabels everything beyond the ceiling as "Removed From Store" from then on. Regression-
+   tested in `test/run-fixtures.sh` (`RedlichBecker` fixture).
+7. **Closed / password-protected** (added 2026-08-21): the merchant has the storefront behind
+   Shopify's password gate — every URL 302s to `/password` and `products.json` returns a bare
+   401. This is a **merchant state, not a scrape failure and not a block on us**, and it is
+   distinguished from a real block by the redirect target (a WAF or IP block returns a challenge
+   or an error page, never a 302 to the store's own `/password`). Detected in
+   `scrapeBestsellerRanks()` from the final URL's path, surfaced as `closed`, flagged in Discord
+   and via a `__closed__` Sheet marker, and **not saved**. The Discord line reads as competitive
+   news ("this store went dark, it is often temporary"), not as an error — before this, such a
+   store reported `PARTIAL — HTTP 401`, which to the external Discord audience looked like a
+   Scout defect. **Do not disable a store for this**: a password gate usually means a rebrand,
+   migration or seasonal close, and tracking resumes by itself if it reopens.
+8. **Sort-suspect** (added 2026-08-05 — see the Primer's Execution Log): coverage is complete —
    catalog and rank scrape both succeeded — but `buildSnapshot()` believes the recorded rank
    *order* is wrong: it either lost `sort_by` to a redirect (`urlIntegrityFail`, exact) or
    correlates too strongly with a locale-aware alphabetical sort of the same titles
@@ -396,6 +430,23 @@ for any competitor that never redirects. See the Primer's 2026-08-05 Execution L
    Handled like Partial, not Capped — flagged in Discord and a `__sort_suspect__` Sheet marker,
    snapshot **not saved**, even though it's coverage-complete: a "complete" week with the wrong
    order would silently corrupt week-over-week movers, which is worse than losing a week.
+
+**The never-save gate is one shared predicate as of 2026-08-21:** `isIncomplete(snapshot)` in
+`lib.js` is the single source of truth for "do not persist this as the trusted baseline," and it
+covers `blocked`, `partial`, `catalogTruncated`, `closed` and `sortSuspect`. `index.js` and
+`competitors.js --add` both call it. They previously carried separate copies of the expression
+and had already drifted: `--add` checked only `blocked || partial`, so a newly-added competitor
+whose baseline came back **sort-suspect was saved anyway**, contrary to what tier 8 above says.
+That is fixed. If you add a new incomplete state, add it to `isIncomplete()` and
+`incompleteLabel()` — not to a call site.
+
+**End-of-catalogue detection (changed 2026-08-21):** the rank crawl treats
+`RANK_EMPTY_PAGE_TOLERANCE` = **3 consecutive** zero-new-handle pages as the end of the
+catalogue. It previously broke on the **first** one, so a single glitched or duplicate page
+silently truncated an entire crawl and was indistinguishable in the output from a real end —
+RedlichBecker stopped at ~page 697 on 2026-08-10 while page 960 still served products. Every
+empty page now logs its index and handle count. Costs 2 extra page fetches per store per run at
+a genuine end; a concrete non-ok status such as 404 past page 1 still ends the crawl immediately.
 
 ## Error handling
 

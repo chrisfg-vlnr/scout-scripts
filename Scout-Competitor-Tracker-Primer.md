@@ -1097,3 +1097,127 @@ sort-integrity guard; corrected the entries above:**
   cross-check whose naive two-branch reading conflicted with the already-gathered overlap evidence
   (correctly resolved in favor of the direct evidence — see above). Full detail:
   `~/Scout_HausOfMode_Recapture_Report_Aug7.md`.
+
+---
+
+**2026-08-21 — Three generic crawl-classification defects fixed (Shopify pagination ceiling, empty-page truncation, password-gated stores):**
+
+**Origin.** The 2026-08-17 read-only diagnosis of two failed Batch D stores
+(`~/reports/Scout-BreuerMode-RedlichBecker-Diagnosis-2026-08-17.md`) found that most of what
+looked like two store-specific failures was **generic** — defects affecting every store, merely
+*exposed* by those two. This session shipped the generic half. The RedlichBecker-specific
+follow-up work that report proposed (the ordering-stability capture) was **cancelled**: the
+external team dropped the store via Discord before this session ran. The three fixes stand on
+their own; RedlichBecker was only the store that surfaced them.
+
+**[1] Shopify's 25,000-product pagination ceiling is a terminal condition, not a block.**
+`products.json` refuses `page × limit > 25,000`, answering HTTP 400 with Shopify's own text
+(`{"errors":"Page * Limit exceeds the 25000 limit."}`); at `limit=250`, page 100 is the last legal
+page. Confirmed live 2026-08-17 (probe P5) and against shopify.dev's documented platform-wide
+pagination limit. `fetchCatalog()`'s non-OK catch-all filed it as `blocked`, which forced the
+store down the `partial` arm and discarded an otherwise-usable snapshot — the right OUTCOME for
+an entirely wrong stated REASON. Generic: **any** store crossing 25,000 products hits it, and
+CristalliSchwiiz is at ~20k and growing toward it.
+
+⚠️ **The trap, and why the obvious fix is the dangerous one.** Recognising the 400 makes
+`blocked` false. The run then falls through to **`capped`** — which **IS saved**, and whose
+Discord line asserts *"the full catalog IS captured."* That statement is false for a catalogue
+Shopify truncated, and the saved snapshot becomes a membership list missing an unknown number of
+products, mislabeling them "Removed From Store"/"New This Week" from then on — exactly what the
+never-save rule exists to prevent (2026-07-17 entry above), and the precise inverse of why
+`capped` is savable at all (2026-07-21 entry above: *because* the catalog fetch is complete). **This was demonstrated, not reasoned about:** a
+tree carrying only the `fetchCatalog` half of the fix wrote `redlichbecker-2026-08-21.json` to
+disk and emitted both "the full catalog IS captured" and "🆕 First snapshot — baseline
+established" against the RedlichBecker fixture. So a truncated catalogue gets its **own** state,
+`catalogTruncated`, evaluated **before** `capped` in `buildSnapshot()`, never saved, with a
+Discord line that presents the catalog count as a **floor** and deliberately shows no coverage
+percentage (any coverage figure would use a truncated denominator). Detection matches Shopify's
+literal error text and is deliberately narrow — if the wording ever changes, behaviour degrades
+to the old blocked→partial→not-saved path, which is safe; a loose match failing the other way is
+not.
+
+**[2] One glitched page silently truncated a whole crawl — the highest-value fix of the three.**
+`scrapeBestsellerRanks()` broke on the **first** zero-new-handle page, so a single transient
+duplicate or glitched page ended an entire crawl and was **indistinguishable in the output from a
+real end of catalogue**. Proven false positive: RedlichBecker stopped at ~page 697 on 2026-08-10
+while page 960 still served 28 products and linked on to 961 (probe P6). This affected **every
+store, every week, invisibly, for as long as the break has existed** — and a truncated week was
+reported as clean and complete. Tolerance is now `RANK_EMPTY_PAGE_TOLERANCE` = 3 consecutive
+empty pages, and every empty page logs its index and handle count so the next occurrence is
+diagnosable rather than inferred. Fixture: a 200-page catalogue with one duplicate page at 50
+returned **1,372 ranked before, 5,572 after** — a 75% silent loss, reported both times as a clean
+week.
+
+⚠️ **`emptyOrDupPages === 0` in the capped test is load-bearing, not tidying.** The old capped
+condition relied on the invariant "`page` can only exceed `cap` via a productive final page,"
+which held *only* because an empty page broke immediately with `page` unincremented. Raising the
+tolerance destroys that invariant: a store whose genuine catalogue ends within 2 pages of its cap
+now increments past the cap while burning its empty-page allowance, and without this term would
+be reported `capped` and told to "raise this store's page cap" after having finished **cleanly**.
+Verified both directions against a fixture ending one page before its cap (a tree with the guard
+removed reports CAPPED; with it, clean).
+
+**[3] Password-gated stores report as CLOSED, a merchant state, not as our failure.** BreuerMode
+went behind Shopify's password gate between 08-10 and 08-17: every URL 302s to `/password`,
+`products.json` returns a bare 401 with no `WWW-Authenticate` and a 0-byte body, and a plain-curl
+UA control behaved identically (probe P3) — the store is closed to **everyone**, not to us. The
+existing URL-integrity check already had the redirect in hand and discarded it, so the run
+reported `PARTIAL — HTTP 401`, which to the external Discord audience reads as a Scout defect.
+The redirect **target** is the discriminator: a WAF or IP block returns a challenge or an error
+page, never a 302 to the store's own `/password`. Now surfaced as `closed`, not saved, reported
+as competitive news. **The store is deliberately NOT disabled** — a password gate usually means a
+rebrand, migration or seasonal close, and tracking should resume by itself if it reopens. Also
+fixed the cosmetic mislabel from the same run: the `!ranks.ok` arm hardcoded
+`Tier 2-partial (catalog only, no rank)` even when the catalog was 0; there is now a `Tier 0`
+arm. No data impact.
+
+**Second save path found and fixed (was not in the diagnosis).** `competitors.js --add` carries
+its **own** baseline-persistence gate, and it had already drifted from `index.js`: it checked only
+`blocked || partial`, so a newly-added competitor whose baseline came back **sort-suspect was
+saved anyway** — contrary to what SKILL.md's own tier list states. Without touching it,
+the external team adding a >25k or password-gated store through Discord would have saved a
+truncated/empty baseline and been told "baseline established," which is the invariant violation
+above walking in through the door nobody was watching. Both call sites now use one shared
+`isIncomplete(snapshot)` predicate in `lib.js` (plus `incompleteLabel()` for routing).
+**If you add a new incomplete state, add it there, not at a call site.**
+
+**Verification — `test/run-fixtures.sh` (committed).** Offline fixture harness, no network and no
+live traffic: `test/mock.mjs` replaces global `fetch` and the throwaway config it generates zeroes
+the pacing delays, so the 901-request RedlichBecker fixture runs in seconds. It runs every
+classification state against the working tree or any git ref, so before/after can be **shown**:
+`./test/run-fixtures.sh pre-generic-crawl-fixes-2026-08-21`. Run against that tag, the
+RedlichBecker and BreuerMode fixtures reproduce their **real 2026-08-17 production run lines
+byte-for-byte**, which is what makes them credible as stand-ins. Live HTTP requests spent this
+session: **zero**.
+
+⚠️ **Fixture trap worth knowing.** The first RedlichBecker fixture used sequential handles
+(`rb-rank-0`, `rb-rank-1`, …), which are perfectly alphabetical and therefore tripped the
+sort-integrity guard — which blocked the save for a reason the real store does not have, masking
+exactly the save behaviour under test. Real RedlichBecker handles carry random bulk-import
+suffixes and score no alphabetical correlation. Generate fixture handles with `scramble()`.
+
+**Regression posture for the other stores.** A healthy store's behaviour is unchanged: the
+`CleanEnd` fixture reports 100% coverage, unflagged, identically before and after. Cost of the
+tolerance is exactly **+2 page fetches per store per run** at a genuine end (measured 12 → 14),
+roughly +3–5s per store and well under a minute across the largest batch. No store should newly
+flip to `capped` (that is what the `emptyOrDupPages === 0` guard prevents); stores that were
+*already* capped are unaffected, and a store that was silently truncating will now legitimately
+crawl **further** than before — deeper, more honest coverage, which is the point, but it is also
+the one place Monday's runtimes could rise beyond the +2-fetch figure, since nobody knows how
+many stores were quietly stopping early.
+
+**Not done, deliberately.** Nothing was ported to Palantir's internal `competitor-tracker`, which
+shares this code lineage and therefore has all three defects — that is a separate session. The
+analogous single-duplicate-page break inside `fetchCatalog()` (a catalog page that adds no new
+handles ends the catalog fetch on the first occurrence) was left alone: same shape as [2], but the
+catalog loop has `products.length < 250` as its primary end signal, and it was outside this
+session's scope. Batch scheduling, cron timeouts, the roster and the gateway-restart risk were all
+untouched.
+
+**Roster note (observed, not acted on).** `config.json` carried uncommitted live edits made by
+Scout itself from Discord and they were left exactly as found: **BreuerMode removed** (in addition
+to RedlichBecker), and **HarperWears, LeonBoutique and ShopWecro added** — 17 enabled, 0 disabled,
+against a cap of 20, with Batch D holding 9. Consequence worth knowing: **no store currently on
+the roster exercises the CLOSED path**, since the store that motivated it is gone. The fix is
+generic and the next store to close would otherwise have reproduced the same
+reads-like-our-bug failure.

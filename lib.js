@@ -726,8 +726,9 @@ export async function buildSnapshot(competitor, cfg, date) {
     // for a catalogue Shopify truncated, and the saved snapshot would become a membership list
     // missing an unknown number of products — which mislabels them as "Removed From Store" /
     // "New This Week" forever after. That is exactly what the never-save rule exists to prevent
-    // (primer S9), and it is precisely why `capped` IS savable: primer S12 is explicit that
-    // capped is safe to save BECAUSE the catalog fetch is complete. Here it is not, and never
+    // (primer Execution Log, 2026-07-17), and it is precisely why `capped` IS savable: the
+    // 2026-07-21 entry is explicit that capped is safe to save BECAUSE the catalog fetch is
+    // complete — the one precondition a truncated catalogue can never meet. Here it is not, and never
     // can be. So: own state, never saved, and it says so in words.
     out.catalogTruncated = true;
     out.catalogTruncatedAt = catalog.truncatedAt;
@@ -795,7 +796,7 @@ export async function buildSnapshot(competitor, cfg, date) {
 //   catalogTruncated— Shopify's pagination ceiling cut the membership list off at 25,000 (see
 //                     buildSnapshot). Same mislabeling as `partial`, permanently, and it is
 //                     specifically NOT `capped`: capped is savable only because a capped run's
-//                     CATALOG is complete and only its RANK depth is cut (primer S12).
+//                     CATALOG is complete and only its RANK depth is cut (primer, 2026-07-21).
 //   closed          — merchant has the storefront password-gated; there is nothing to save.
 //   sortSuspect     — coverage-complete but believed MISORDERED (alphabetical, not sales-
 //                     ranked); saving it replaces a known-good rank baseline with noise that
