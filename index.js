@@ -12,6 +12,7 @@ import fs from 'node:fs/promises';
 import {
   loadConfig, slug, buildSnapshot, saveSnapshot, loadSnapshots, pruneSnapshots,
   computeMetrics, ROOT, getSheetsClient, writeCompetitorTab, isIncomplete, incompleteLabel,
+  describeDecliners,
 } from './lib.js';
 
 // ─── args ──────────────────────────────────────────────────────────────────────
@@ -207,9 +208,14 @@ function buildCompetitorReport(summary, prettyDate) {
   for (const r of up) L.push(`  ${mdEscape(r.title).slice(0, 48)}  ${fmtRank(r.lastRank)} → ${fmtRank(r.thisRank)}  (${sgn(r.wow)})`);
   L.push('');
   L.push('📉 **Biggest movers down:**');
-  const down = summary.moversDown.slice(0, 12);
-  if (down.length === 0) L.push('  (none)');
-  for (const r of down) L.push(`  ${mdEscape(r.title).slice(0, 48)}  ${fmtRank(r.lastRank)} → ${fmtRank(r.thisRank)}  (${sgn(r.wow)})`);
+  // The context line and any tie collapse come from describeDecliners() so this report
+  // and query.js's --decliners cannot drift — see the helper's note in lib.js for why a
+  // bare top-12 slice reads as broken data on a tied week (2026-08-24).
+  const decl = describeDecliners(summary, 12);
+  if (decl.context) L.push(`  _${decl.context}_`);
+  if (decl.list.length === 0) L.push('  (none)');
+  for (const r of decl.list) L.push(`  ${mdEscape(r.title).slice(0, 48)}  ${fmtRank(r.lastRank)} → ${fmtRank(r.thisRank)}  (${sgn(r.wow)})`);
+  if (decl.note) L.push(`  _${decl.note}_`);
   L.push('');
   L.push(`🆕 New products this week: ${summary.newCount}`);
   L.push(`❌ Removed from store: ${summary.removedCount}`);

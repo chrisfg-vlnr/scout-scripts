@@ -1009,6 +1009,66 @@ export function computeMetrics(snaps, cfg = {}) {
   return { rows, summary };
 }
 
+// ─── decliner-list presentation (shared by the weekly report and the Q&A path) ──
+// Rank is a permutation of a fixed set of positions: a product's rank rises by
+// EXACTLY the number of products that overtook it. Two consequences the raw
+// "top N decliners" list hid until 2026-08-24:
+//
+//   1. Declines are BOUNDED by how many products passed, which for the dense middle
+//      of a catalogue is small, while gains are unbounded (a product can leap -711).
+//   2. Every product in the contiguous band that the same k risers jumped over
+//      declines by the IDENTICAL k — so the worst value is typically shared by
+//      dozens or hundreds of products.
+//
+// A plain top-N slice therefore prints one number N times and reads as broken data.
+// On 2026-08-24 it did exactly that (HausOfMode: 20 identical +35s; BelroShop: 0 new,
+// 0 removed, deltas summing to 0 — pure churn), and Scout reported a store-wide
+// "uniform shift" to the external team on the strength of it. The ranks were correct
+// the whole time; only the presentation lied.
+//
+// This is the single source of the context line and the tie collapse for BOTH
+// index.js's weekly Discord report and query.js's --decliners path. Sharing it is
+// load-bearing, not tidiness: patching only the weekly report would leave Scout
+// repeating the same wrong answer the next time the team asks in Discord — the same
+// two-call-sites-drift failure isIncomplete() was introduced to close (2026-08-21 §2.4).
+
+// How many worked examples to show once a tie has swallowed the whole list.
+export const DECLINER_TIE_EXAMPLES = 3;
+
+function fmtInt(n) { return n.toLocaleString('en-US'); }
+function plural(n, word) { return `${fmtInt(n)} ${word}${n === 1 ? '' : 's'}`; }
+
+// listLength = how many rows the caller was about to render. The tie is treated as
+// having swallowed the list only when it fills that many slots, so a caller asking
+// for 50 rows is not collapsed by a 12-way tie that leaves 38 informative rows.
+export function describeDecliners(summary, listLength) {
+  const down = summary.moversDown ?? [];
+  const upCount = (summary.moversUp ?? []).length;
+  if (down.length === 0) return { context: null, list: [], collapsed: false, tiedAtWorst: 0, worst: null, note: null };
+
+  const worst = down[0].wow;                       // moversDown is sorted desc by wow
+  const mildest = down[down.length - 1].wow;
+  const tiedAtWorst = down.filter(r => r.wow === worst).length;
+  const span = mildest === worst ? `${fmtInt(worst)}` : `${fmtInt(mildest)}–${fmtInt(worst)}`;
+
+  let context =
+    `${plural(down.length, 'product')} slipped ${span} place${worst === 1 ? '' : 's'} this week` +
+    ` as ${plural(upCount, 'product')} rose — a product falls one place for each product that overtakes it.`;
+  if (tiedAtWorst > 1) context += ` ${plural(tiedAtWorst, 'product')} tied at the largest drop (+${fmtInt(worst)}).`;
+
+  // Collapse only when the tie genuinely fills the list: showing twelve rows that all
+  // read "+35" is the defect. Below that threshold the list still carries a spread and
+  // is left exactly as it was, so ordinary weeks are unchanged.
+  const collapsed = tiedAtWorst >= listLength && listLength > DECLINER_TIE_EXAMPLES;
+  const list = collapsed ? down.slice(0, DECLINER_TIE_EXAMPLES) : down.slice(0, listLength);
+  const note = collapsed
+    ? `…and ${plural(tiedAtWorst - DECLINER_TIE_EXAMPLES, 'other product')} tied at exactly +${fmtInt(worst)}` +
+      ` — they were passed by the same ${plural(worst, 'product')}, so this is ordinary churn, not a store-side event.`
+    : null;
+
+  return { context, list, collapsed, tiedAtWorst, worst, note };
+}
+
 // ─── Google Sheets writer ───────────────────────────────────────────────────
 // Shared by index.js (weekly run) and competitors.js (--add baseline), so a
 // newly-added competitor's Sheet tab is written at add-time, not left to lag

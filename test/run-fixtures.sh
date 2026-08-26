@@ -23,6 +23,15 @@
 #                                  reported as capped (regression guard for the tolerance).
 #   CleanEnd       cleanend        ordinary healthy store. MUST stay 100% coverage, unflagged.
 #   EmptyGrid      emptygrid       no catalog and no ranks, no redirect. Tier 0 label.
+#
+# Two-week fixtures (report presentation, not crawl classification). Both weeks crawl
+# identically clean; only the bestseller ORDER changes, so any difference is the report:
+#   TiedDecliners   tieddecliners   a block of products overtakes a contiguous band, so that
+#                                   band declines by ONE identical amount. Before the fix the
+#                                   top-12 list is twelve identical rows with no context — the
+#                                   2026-08-24 defect. After: context line + collapsed tie.
+#   SpreadDecliners spreaddecliners ordinary movement, max decline shared by only a few.
+#                                   REGRESSION GUARD: the list must still render in full.
 set -u
 REF="${1:-}"
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
@@ -49,6 +58,8 @@ c["competitors"] = [
   {"name":"EndAtCapMinus1","baseUrl":"https://endcap.example","collection":"all","enabled":True,"maxRankPages":20,"batch":"D","currency":None},
   {"name":"CleanEnd","baseUrl":"https://clean.example","collection":"all","enabled":True,"batch":"D","currency":None},
   {"name":"EmptyGrid","baseUrl":"https://empty.example","collection":"all","enabled":True,"batch":"D","currency":None},
+  {"name":"TiedDecliners","baseUrl":"https://tied.example","collection":"all","enabled":True,"batch":"D","currency":None},
+  {"name":"SpreadDecliners","baseUrl":"https://spread.example","collection":"all","enabled":True,"batch":"D","currency":None},
 ]
 json.dump(c, open(sys.argv[2] + "/config.json", "w"), indent=2)
 PY
@@ -61,7 +72,33 @@ run() {
   local saved; saved="$(ls "$T/data" 2>/dev/null | tr '\n' ' ')"
   echo "    saved: ${saved:-<nothing>}"
 }
+# Two-week runner: week 1 establishes the baseline snapshot through the REAL buildSnapshot/
+# saveSnapshot path (no hand-written snapshot JSON to drift from the real format), week 2
+# supplies the movement and prints the report. --no-discord makes index.js print the report
+# preview, which is the artefact under test.
+run2week() {
+  rm -rf "$T/data"
+  ( cd "$T" && FIXTURE="$2" WEEK=1 node --import ./mock.mjs index.js --only "$1" \
+      --no-sheet --no-discord --no-prune --date 2026-08-17 ) > "$T/w1.txt" 2>&1
+  ( cd "$T" && FIXTURE="$2" WEEK=2 node --import ./mock.mjs index.js --only "$1" \
+      --no-sheet --no-discord --no-prune --date 2026-08-24 ) > "$T/w2.txt" 2>&1
+  echo "--- $1"
+  if ! grep -q "Biggest movers down" "$T/w2.txt"; then
+    echo "    !! no report produced — week 1 baseline likely did not save"
+    grep -E "^  Tier|error" "$T/w1.txt" | sed 's/^/    w1: /'
+    return
+  fi
+  # Everything from the movers-down heading to the next blank-prefixed section.
+  sed -n '/Biggest movers down/,/New products this week/p' "$T/w2.txt" \
+    | grep -v "New products this week" | sed 's/^/    /'
+  echo "    distinct WoW values shown: $(sed -n '/Biggest movers down/,/New products this week/p' "$T/w2.txt" \
+    | grep -oE '\(\+[0-9]+\)' | sort -u | tr '\n' ' ')"
+}
+
 for f in "RedlichBecker redlichbecker" "BreuerMode breuermode" "GlitchPage glitchpage" \
          "EndAtCapMinus1 endatcapminus1" "CleanEnd cleanend" "EmptyGrid emptygrid"; do
   run $f
+done
+for f in "TiedDecliners tieddecliners" "SpreadDecliners spreaddecliners"; do
+  run2week $f
 done

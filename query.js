@@ -16,7 +16,7 @@
 //   node query.js --competitor Belro --product <handle-or-text>
 
 import fs from 'node:fs/promises';
-import { loadConfig, slug, loadSnapshots, computeMetrics, DATA_DIR } from './lib.js';
+import { loadConfig, slug, loadSnapshots, computeMetrics, describeDecliners, DATA_DIR } from './lib.js';
 
 function parseArgs(argv) {
   const a = {};
@@ -101,11 +101,21 @@ async function main() {
   }
 
   let title, list;
+  // Decliner context/tie-collapse lines, populated only on the --decliners path.
+  let declContext = null, declNote = null, declTotal = null;
   if (args.hotStreaks)          { title = 'Hot streaks (rising 3+ consecutive weeks)'; list = rows.filter(r => r.hotStreak); }
   else if (args.consistentTop10){ title = 'Consistent top 10 (all tracked weeks)';     list = rows.filter(r => r.consistentTop10); }
   else if (args.newOnly)        { title = 'New this week';                              list = rows.filter(r => r.status === 'New This Week'); }
   else if (args.removedOnly)    { title = 'Removed from store';                         list = rows.filter(r => r.status === 'Removed From Store'); }
-  else if (args.decliners)      { title = `Top ${args.decliners} decliners (falling fastest)`; list = summary.moversDown.slice(0, args.decliners); }
+  else if (args.decliners)      {
+    // Same helper as the weekly Discord report. Without it this path answers a
+    // Discord question with N identical rows and invites exactly the store-wide
+    // "uniform shift" misreading that happened on 2026-08-24 — see lib.js.
+    const decl = describeDecliners(summary, args.decliners);
+    title = `Top ${args.decliners} decliners (falling fastest)`;
+    list = decl.list; declContext = decl.context; declNote = decl.note;
+    declTotal = summary.moversDown.length;
+  }
   else if (args.summary)        { title = null; list = null; }
   else                          { const n = args.topMovers || 20; title = `Top ${n} movers up (fastest risers)`; list = summary.moversUp.slice(0, n); }
 
@@ -119,8 +129,12 @@ async function main() {
     return;
   }
 
-  console.log(`\n${title}: ${list.length}`);
+  // On a collapsed decliner list, report the true decliner count rather than the
+  // number of rows printed, so "3" can never be read as "only 3 products fell".
+  console.log(`\n${title}: ${declTotal ?? list.length}`);
+  if (declContext) console.log(declContext);
   for (const r of list.slice(0, Math.max(args.topMovers || 0, args.decliners || 0, 50))) console.log(line(r));
+  if (declNote) console.log(declNote);
 }
 
 main().catch(e => { console.error(e?.stack || String(e)); process.exit(1); });

@@ -77,6 +77,45 @@ function route(urlStr) {
     return mk(200, grid(Array.from({length:4}, (_,i)=>`ce-${scramble((page-1)*4+i)}`)), HTMLH);
   }
 
+  // ── decliner-presentation fixtures (two-week: WEEK=1 baseline, WEEK=2 movement) ──
+  // These exist to test the REPORT, not the crawl, so both weeks crawl identically clean;
+  // only the bestseller ORDER differs. Handles go through scramble() for the reason given
+  // above: sequential handles are perfectly alphabetical and would trip the sort-integrity
+  // guard, blocking the save and masking the behaviour under test.
+  //
+  // TiedDecliners reproduces 2026-08-24: a block of products overtakes a contiguous band,
+  // so that whole band declines by the IDENTICAL amount and fills a top-12 list with one
+  // number. SpreadDecliners is the regression guard — ordinary movement, no wide tie, list
+  // must render unchanged.
+  if (FIX === 'tieddecliners' || FIX === 'spreaddecliners') {
+    const N = 60, PFX = FIX === 'tieddecliners' ? 'td' : 'sd';
+    const H = Array.from({ length: N }, (_, i) => `${PFX}-${scramble(i)}`);
+    const week = process.env.WEEK === '2' ? 2 : 1;
+    const ident = Array.from({ length: N }, (_, i) => i);
+    let order;
+    if (week === 1) order = ident;                       // baseline: rank i+1 for H[i]
+    else if (FIX === 'tieddecliners') {
+      // 15 products from old ranks 41-55 jump to the front. Old ranks 1-20 all shift
+      // +15; old ranks 21-40 all shift +16 (one extra passes them). Two wide ties.
+      order = [
+        ...Array.from({ length: 15 }, (_, i) => 40 + i),   // -> new ranks 1-15
+        ...Array.from({ length: 20 }, (_, i) => i),        // old 1-20  -> new 16-35  (+15)
+        55,                                                // old 56    -> new 36
+        ...Array.from({ length: 20 }, (_, i) => 20 + i),   // old 21-40 -> new 37-56  (+16)
+        56, 57, 58, 59,                                    // unchanged tail
+      ];
+    } else {
+      // One product leaps from last to first; everything else drifts by 1-2 places.
+      // Max decline is +2 and only a handful share it, so no collapse must occur.
+      order = [59, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 10, 13, 12, 15, 14, 17, 16, 19, 18,
+        ...Array.from({ length: 39 }, (_, i) => 20 + i)];
+    }
+    if (isJson) return mk(200, products(H), JSONH);
+    const per = 10;
+    const slice = order.slice((page - 1) * per, page * per).map(i => H[i]);
+    return mk(200, grid(slice), HTMLH);                  // empty grid past the end -> clean stop
+  }
+
   if (FIX === 'emptygrid') {
     // Catalog 401 (no redirect anywhere), rank pages 200-but-empty. The shape that produced
     // the self-contradicting 'Tier 2-partial (catalog only, no rank) | catalog 0' label.
