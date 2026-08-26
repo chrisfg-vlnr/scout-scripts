@@ -1221,3 +1221,77 @@ against a cap of 20, with Batch D holding 9. Consequence worth knowing: **no sto
 the roster exercises the CLOSED path**, since the store that motivated it is gone. The fix is
 generic and the next store to close would otherwise have reproduced the same
 reads-like-our-bug failure.
+
+---
+
+### 2026-08-25 — the "uniform shift" that wasn't: decliner lists are tied by construction
+
+**What was reported.** After Monday 2026-08-24 (the first run on the five 2026-08-21 crawl commits)
+Michael flagged that the biggest-movers-down lists "have weird data, like all the same + amount of
+rankings". Scout investigated its own data, correctly found that CristalliSchwiiz showed +138,
+HausOfMode +35, BelroShop +30 and LeonBoutique +146, and told the team this was a **store-level
+catalog reshuffle** — "not a tracker malfunction, just not a useful signal this week".
+
+**The explanation was wrong.** The ranks were correct and the crawl was healthy. Rank is a
+permutation: a product's rank rises by exactly the number of products that overtook it. Declines
+are therefore **bounded** (small, for the dense middle of a catalogue) while gains are unbounded,
+and every product in the contiguous band that the same *k* risers jumped over falls by the
+**identical** *k*. The four numbers Scout reported were each simply that store's **maximum**
+decline, and the number of products tied at it was 111 / 144 / 7 / 16 — enough to fill the whole
+top-12 list with one value.
+
+**How the wrong story was formed.** `query.js --decliners 20` — Scout's own Q&A path — sliced
+`summary.moversDown` with no context and no tie disclosure. Replayed against the stored snapshots
+it returns **twenty identical +35s** for HausOfMode. Scout did not misread its data; it read a list
+that only ever shows the tied maximum and generalised from it to the whole store.
+
+**Ruled out, with the observation that did it.** The five 2026-08-21 commits were affirmatively
+cleared, not merely un-implicated: the same tie-plateau is present in weeks that ran on the *old*
+code — Gartenort 08-10→08-17 had **79** products tied at +7, CristalliSchwiiz 08-10→08-17 had
+**212** tied at +456. Merchant reshuffle was killed by BelroShop, which showed **0 new, 0 removed,
+deltas summing to exactly 0**, and whose +30 product was verified to have been overtaken by exactly
+30 real, already-tracked neighbours and 0 in the other direction. A live probe confirmed BelroShop's
+grid top-12 is identical to both weeks' snapshots — no junk-at-front displacement, i.e. **not** a
+repeat of the Aug 5–7 HausOfMode incident this superficially resembled.
+
+**Data verdict: not poisoned, and deliberately no remediation.** Every store terminated at a genuine
+catalog end via the 3-empty-page rule with coverage 100% and no flags, so Monday's snapshots are the
+correct baseline for 2026-08-31. This is the **opposite** call from the HausOfMode saga, and the
+contrast is the point: there the stored ranks were genuinely wrong and archive-plus-recapture was the
+only repair; here archiving good data would have destroyed a clean baseline and manufactured the
+false-diff problem. NouveauRiche was the one real poisoning candidate (804→423 ranked, saved clean,
+on the historically Cloudflare-blocked store) and was cleared by a live probe: catalog page 2
+returned 129 products, so the live catalogue is ~379 — the store genuinely shrank and the 382
+removals are real.
+
+**Fixed (2026-08-25).** `describeDecliners()` in `lib.js` is now the single source of a context line
+("*3,280 products slipped 1–30 places this week as 1,012 products rose … 7 products tied at the
+largest drop (+30)*") and of a tie collapse to three worked examples when the tie fills the list.
+Shared by `index.js`'s weekly report **and** `query.js --decliners` — patching only the weekly report
+would have left Scout repeating the same wrong answer the next time the team asked in Discord, the
+same two-call-sites-drift failure `isIncomplete()` was introduced to close. Two-week fixtures
+`TiedDecliners` / `SpreadDecliners` were added to the harness; against the pre-fix tree the former
+prints twelve identical +16 rows with no context, and the latter is byte-identical before and after
+(regression guard). The six crawl-classification fixtures are unchanged.
+
+**Also fixed: the reasoning failure, not just the code.** SKILL.md gained a "Reading decliners"
+section — declines tie by construction, a uniform decline is arithmetic and not a store-side event,
+never offer a merchant-behaviour explanation that has not been tested against the snapshots, point
+the team at movers UP, and treat "several unrelated merchants did the same thing this week" as the
+hypothesis of last resort. Fix A repairs the report; without this, nothing repaired the half of the
+incident that was Scout's reasoning.
+
+**Known artefact, one week only, communicated rather than fixed.** `e4036ae` recovered catalogue tail
+that the old break-on-first-empty-page rule had been silently dropping, so several stores' "new
+products" counts are inflated with products that existed all along: JesseLondon **373** (ranked
+854→1200), DriftAndTide **187** (958→1101), LeonBoutique 99, ShopWecro 30. Self-correcting from
+2026-08-31 now that the deeper snapshot is the baseline.
+
+**Left open.** A materiality threshold for decliners (only list drops above ~1% of catalogue) was
+designed and **deliberately not shipped** — it changes what the team sees week to week and is a
+product decision, not a bug fix. Palantir's `~/scripts/competitor-tracker/` shares this reporting
+lineage and very likely has the same artefact; port after this settles. The `fetchCatalog()`
+single-duplicate-page break carried forward from 2026-08-21 is **in this repo's own `lib.js`**, not
+only in Palantir's copy, and remains open.
+
+Full writeup: `~/reports/Scout-UniformShift-Investigation-2026-08-25.md`.

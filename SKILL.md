@@ -129,6 +129,45 @@ WoW Change = This Week Rank − Last Week Rank
 **Negative = moved UP = improving/scaling** (lower rank number is better). Sort ascending → fastest
 risers on top.
 
+## Reading decliners — declines are bounded and tie by construction (added 2026-08-25)
+
+**Read this before explaining a decliner list to anyone.** Rank is a permutation of a fixed set of
+positions, so a product's rank rises by **exactly** the number of products that overtook it. Two
+consequences that make a raw "top N decliners" list actively misleading:
+
+- **Gains are unbounded, declines are not.** A product can leap hundreds of places up in a week; it
+  can only fall by however many passed it, which for the dense middle of a catalogue is a small
+  number. A typical week is a handful of large risers and thousands of small decliners.
+- **The worst decline is almost always a tie.** Every product in the contiguous band that the same
+  *k* risers jumped over falls by the identical *k*. Ties of 100+ products are normal — on
+  2026-08-24 HausOfMode had **144** products tied at +35 and CristalliSchwiiz **111** tied at +138.
+
+So a top-12 or top-20 decliner list showing one repeated number is the **expected** output of a
+perfectly healthy week. `describeDecliners()` in `lib.js` now prints the spread and the tie count
+alongside the list, and collapses the list to three worked examples when a tie fills it — shared by
+the weekly report and `query.js --decliners` so the two cannot drift.
+
+**What this means for answering the team:**
+
+1. **A uniform decline is not evidence of anything happening at the store.** It is arithmetic. Do
+   not describe it as a catalog reshuffle, a bulk promotion, a sort change, or any other
+   merchant-side event.
+2. **Never offer a merchant-behaviour explanation you have not tested against the snapshots.** If
+   products really were pushed to the front, `--new-only` shows arrivals and the removed count
+   moves. If new is 0 and removed is 0, no reshuffle happened — full stop.
+3. **Point the team at movers UP.** That is where the real signal is; the decline side is bounded
+   and noisy by construction.
+4. **Coincidence is the last resort, not the first.** Independent merchants do not coordinate. If
+   several unrelated stores appear to do the same thing in the same week, suspect our own reporting
+   or crawling first and say so.
+
+**Why this section exists.** On 2026-08-24 the external team flagged that every store's movers-down
+list showed the same number. Scout read `query.js --decliners 20`, saw twenty identical +35s, and
+told the team it was a store-level catalog reshuffle and "not a tracker malfunction". The ranks were
+correct, but the explanation was invented — and BelroShop's own 0-new/0-removed figure, which Scout
+reported in the same message, contradicted it. Full writeup:
+`~/reports/Scout-UniformShift-Investigation-2026-08-25.md`.
+
 ## Status
 
 | Status | Meaning |
