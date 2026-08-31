@@ -304,10 +304,16 @@ const HREF_PRODUCT_RE = /href="[^"]*?\/products\/([a-z0-9][a-z0-9\-_%]*)(?:[?#][
 // picking up ~50 product links from a sitewide Cart Drawer add-on-product upsell widget that sits
 // earlier in the page's byte order than the actual collection grid, corrupting the leading ~50
 // "ranks" on that store (real grid content only starts at `id="CollectionAjaxContent"`).
+// 2026-08-31: added id=ProductGridContainer and id=product-grid (Dawn theme markers)
+// after confirming CristalliSchwiiz has pakket-bescherming (shipping-protection app product)
+// appended as rank=total in every snapshot — picked up outside the real grid. BelroShop
+// confirmed clean (its junk handles already caught by junkHandlePatterns).
 const GRID_CONTAINER_MARKERS = [
   /id="CollectionAjaxContent"/i,
   /class="collection-grid__wrapper"/i,
   /data-section-type="collection-grid"/i,
+  /id="ProductGridContainer"/i,
+  /id="product-grid"/i,
 ];
 
 function extractHandlesFromSlice(html) {
