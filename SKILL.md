@@ -161,6 +161,15 @@ the weekly report and `query.js --decliners` so the two cannot drift.
    several unrelated stores appear to do the same thing in the same week, suspect our own reporting
    or crawling first and say so.
 
+**Reading movers UP on a very large store.** On a store with tens of thousands of products, most of
+the catalogue has never sold, and Shopify parks everything with zero sales in a long undifferentiated
+tail. The moment one of those products takes its **first single sale** it enters the sales-ranked
+band, which on CristalliSchwiiz means a jump from around #19,900 to around #1,900–2,050. Every week
+that store's "biggest movers up" list is dominated by exactly that. It is arithmetic about where the
+tail ends, **not** a store event, not a new campaign, not a restock — do not explain it to the team
+as one. If asked, say: those are products getting their first sale and crossing out of the unranked
+tail. A real signal on a store that size is a product moving inside the top few hundred.
+
 **Why this section exists.** On 2026-08-24 the external team flagged that every store's movers-down
 list showed the same number. Scout read `query.js --decliners 20`, saw twenty identical +35s, and
 told the team it was a store-level catalog reshuffle and "not a tracker malfunction". The ranks were
@@ -470,14 +479,66 @@ for any competitor that never redirects. See the Primer's 2026-08-05 Execution L
    snapshot **not saved**, even though it's coverage-complete: a "complete" week with the wrong
    order would silently corrupt week-over-week movers, which is worse than losing a week.
 
+9. **Phantom-suspect** (added 2026-09-03 — see the Primer's Execution Log): coverage is complete,
+   the order looks fine to the sort guard, but one of the **top 50 ranks is held by a handle that
+   is not in the store's `products.json` at all**. `buildSnapshot()` already gives such a handle a
+   row (a "rank-only synthesized entry") because a real product the JSON view filtered out is a
+   real product — harmless at rank 18,000, a lie at rank 1. In practice it means a cart-drawer /
+   upsell / shipping-protection app link was picked up from the page furniture instead of the
+   bestseller grid, and **every real product below it is reported one rank too low**. Flagged in
+   Discord, `__phantom_suspect__` Sheet marker, snapshot **not saved** — handled like Sort-suspect
+   for the same reason (a coverage-complete week with the wrong order corrupts movers silently).
+   Found on CristalliSchwiiz, where `pakket-bescherming` — a Dutch shipping-protection add-on whose
+   product page 404s — sat at **#1 in all four stored weeks and in the Sheet**, undetected by every
+   guard in this list, because they all measure ORDER or COVERAGE and none measured MEMBERSHIP.
+   **Deliberate blind spot:** the check is skipped, with a log line, when more than **10%** of
+   ranked handles are absent from the catalog — there it is the catalog that is incomplete, not the
+   grid that is haunted, so "absent from the catalog" carries no signal. Real stores sit at
+   0.000–0.005%.
+10. **Coverage-collapse** (added 2026-09-03): `rankedCount` came back below **50%** of the last
+   saved week's on a run that reported **neither `capped` nor `partial`** — i.e. a crawl that
+   believes it finished normally but ranked less than half a store. Far more likely to be a change
+   in how we read the page (a container marker matching in the wrong place and scoping the crawl
+   down to a sub-grid, a theme edit, a silent wall) than a merchant deleting most of their
+   catalogue. Flagged in Discord, `__coverage_collapse__` Sheet marker, snapshot **not saved** —
+   saving it would report the missing half as "Removed From Store". Palantir got this class of
+   guard after its 2026-07-27 silent-collapse incident; Scout previously had only a console warning
+   at `coverage < 0.6` that still saved the snapshot.
+    **If a store legitimately shrinks by more than half, this gets STUCK** — the refused snapshot
+    never advances the baseline it is compared against, so it fires again every week. That is the
+    intended direction (loud and stuck beats silent and wrong). **Manual recovery, Chris only:**
+    move that store's stale snapshots out of `data/` to an archive directory **outside the repo**
+    (the 2026-08-07 HausOfMode precedent), then re-run its batch with
+    `openclaw cron run <job-id>` — never raw `node index.js`, which bypasses `.run.lock`. The
+    threshold is **not** a `config.json` value on purpose: Scout edits `config.json` live on
+    external Discord requests, and a guard an untrusted user can dial down is not a guard.
+
 **The never-save gate is one shared predicate as of 2026-08-21:** `isIncomplete(snapshot)` in
 `lib.js` is the single source of truth for "do not persist this as the trusted baseline," and it
-covers `blocked`, `partial`, `catalogTruncated`, `closed` and `sortSuspect`. `index.js` and
+covers `blocked`, `partial`, `catalogTruncated`, `closed`, `sortSuspect` and — as of 2026-09-03 —
+`phantomSuspect` and `coverageCollapse`. `index.js` and
 `competitors.js --add` both call it. They previously carried separate copies of the expression
 and had already drifted: `--add` checked only `blocked || partial`, so a newly-added competitor
 whose baseline came back **sort-suspect was saved anyway**, contrary to what tier 8 above says.
 That is fixed. If you add a new incomplete state, add it to `isIncomplete()` and
 `incompleteLabel()` — not to a call site.
+
+**Grid extraction is three tiers as of 2026-09-03**, logged once per store per run as
+`grid extraction: …` (grep that string in a batch's output):
+1. `marker` — a known collection-grid container id matched (`CollectionAjaxContent`,
+   `collection-grid__wrapper`, `collection-grid`, and since 2026-08-31 the Dawn-theme
+   `ProductGridContainer` / `product-grid`). Scoped from the marker to `</main>`.
+2. `main` — no marker matched, so only `<main>…</main>` is read. Shopify themes render the
+   collection template into `<main>`; the cart drawer, header and upsell widgets that caused both
+   contamination incidents sit **before** it. Verified a no-op on a clean fallback store: Belro's
+   saved page-1/page-2/title-ascending bodies yield byte-identical handles either way.
+3. `page` — no marker and no usable `<main>`: the whole page, exactly as before any of this.
+**HTML comments are stripped before extraction at every tier.** The href regex never knew the
+difference, and a commented-out cart-drawer link was Cristalli's phantom. A commented-out link is
+never a visible grid item, so nothing real can be lost.
+**Expect most fallback stores to move `page → main` on 2026-09-07.** A changed path is normal and is
+NOT by itself a finding; the discriminators are the `rankedCount` delta versus 2026-08-31 and
+whether the top 10 still resembles last week's.
 
 **End-of-catalogue detection (changed 2026-08-21):** the rank crawl treats
 `RANK_EMPTY_PAGE_TOLERANCE` = **3 consecutive** zero-new-handle pages as the end of the

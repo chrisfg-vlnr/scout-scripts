@@ -1295,3 +1295,171 @@ single-duplicate-page break carried forward from 2026-08-21 is **in this repo's 
 only in Palantir's copy, and remains open.
 
 Full writeup: `~/reports/Scout-UniformShift-Investigation-2026-08-25.md`.
+
+---
+
+### 2026-09-03 — the #1 bestseller that was not a product: a commented-out link, four rewritten weeks, and a guard set that measured everything except membership
+
+**What was wrong.** CristalliSchwiiz's Sheet tab had shown `Pakket Bescherming` as the store's **#1
+best seller** every week since at least 2026-08-10 — blank price, WoW 0, "Consistent Top 10" TRUE,
+and a product URL that returns **HTTP 404**. It is not a product. It is a Dutch shipping-protection
+add-on rendered by the theme's cart drawer, and the merchant (or the app) left its link **inside an
+HTML comment**:
+
+```
+<!--<a href="/collections/all/products/pakket-bescherming">--> <b>Sicherheitspaket</b>
+```
+
+`HREF_PRODUCT_RE` is a byte regex. It does not know what a comment is. The link sits at ~422KB,
+`<main>` starts at ~504KB and the real grid at ~517KB, so the phantom was the **first handle on
+every page of every crawl**, `seen`-deduped thereafter, and — because it is absent from
+`products.json` — `buildSnapshot()` gave it a rank-only synthesized row at **rank 1**. Every real
+product was therefore recorded **one rank too low** for four stored weeks. Week-over-week movement
+was unaffected (a constant offset cancels); the #1 slot, the absolute ranks, the top-10 flags and
+the Sheet were not.
+
+**Why nothing caught it.** Every guard in the set measures **order** (`detectAlphabeticalSort`, ρ =
+−0.043 here — nowhere near firing) or **coverage** (99.98%) or **redirects** (`urlIntegrityFail`,
+needs a hop; this store has none). **Nothing measured membership.** The run log even printed
+`1 handle on page` on the empty tail pages every week from 2026-08-24 — the fingerprint of a
+sitewide element, since a handle that survives past the end of the catalogue is furniture by
+definition — and the line did not name the handle, so nobody could read it.
+
+**What Scout did on 2026-08-31, and what it got wrong.** Acting on Michael's Discord message, Scout
+ran ~30 arbitrary `exec` commands, fetched both storefronts live, edited production `lib.js` to add
+the Dawn markers `id="ProductGridContainer"` / `id="product-grid"`, committed it under Chris's git
+identity (`1c54a6b`, left unpushed) and replied "CristalliSchwiiz — fixed ✅". **The code change was
+correct** and is kept. **The explanation was wrong:** Scout measured the phantom's position with
+`products.findIndex()` — the array index of an entry that is appended last — instead of its `rank`
+field, concluded "appended as rank = total … zero practical impact", and told the external team so.
+The stored `rank` was 1. See the governance note at the end of this entry.
+
+**What shipped (`dcbe745`, on top of `1c54a6b`; both pushed).** Fixes 2–5 of the 2026-09-03 report §7:
+
+- **Fix 2 — strip HTML comments before extracting handles.** Mechanism-specific, blast radius nil: a
+  commented-out link is never a visible grid item, so nothing real can be dropped. This alone fixes
+  Cristalli on the whole-page path with no marker involved.
+- **Fix 3 — a `<main>` tier between "a marker matched" and "read the whole page."** Both
+  contamination incidents this tracker has had (HausOfMode 2026-08-05, this one) lived in the
+  header/cart drawer, **before** `<main>`. An empty slice degrades to the whole page exactly as
+  before. Deliberately **not** ratio-guarded against the whole-page count — a header mega-menu with
+  more links than a 12-item grid page is precisely the case this exists for. `gridScoped` keeps its
+  old narrower meaning ("a known marker matched") so Aug-31-vs-Sep-7 comparisons still mean the same
+  thing; the new three-way path lands in `gridScopePath` (`marker` | `main` | `page`).
+- **Fix 4 — phantom-in-top-50.** A rank-only synthesized entry inside the top 50 sets
+  `phantomSuspect`: Discord line, `__phantom_suspect__` Sheet marker, snapshot **not saved**, same
+  treatment as `sortSuspect`. **Design addition beyond §7:** the check is skipped, with a log line,
+  when more than **10%** of ranked handles are absent from the catalog — there it is the catalog
+  that is incomplete, not the grid that is haunted. Dry-run across all 72 stored snapshots: real
+  stores sit at **0.000–0.005%** and Cristalli is the **only** store this would ever have fired on.
+- **Fix 5 — coverage collapse.** `rankedCount` below **50%** of the last saved week, on a run
+  reporting neither `capped` nor `partial`, sets `coverageCollapse` and is not saved. This is the
+  safety net for the unverified blast radius of the two new Dawn markers **and** of Fix 3 across the
+  fallback stores on 2026-09-07. **Not** a `config.json` value: Scout edits `config.json` live on
+  external Discord requests, and a guard an untrusted user can dial down is not a guard.
+- Empty tail pages now **name** the handles they saw, not just count them.
+- `competitors.js --add`'s refusal map gained both new labels — it would otherwise have told an
+  external Discord user "Baseline snapshot **undefined**".
+
+**Fix 6 was NOT applied.** Junk-filtering shipping-protection / CO₂ add-ons by name pattern
+(`pakket`, `bescherming`, `zekerheid`, `sicherheitspaket`, …) changes what the team sees and is a
+product decision pending Michael. `junkHandlePatterns` untouched. Note that the rewritten 2026-08-10
+snapshot's new #1 is `sicherheitspaket` (CHF 4.95) — a **real** catalog product of exactly that
+kind, which is what makes Fix 6 a live question rather than a hypothetical one.
+
+**Verification — the diff is the test.** `test/run-fixtures.sh` run against tag
+`pre-cristalli-fix-20260904` and the working tree. All **8 pre-existing fixtures byte-identical**
+(and that is not luck: the 10% catalog-trust rule is what keeps GlitchPage and EndAtCapMinus1
+identical, confirmed by its own `phantom check SKIPPED` log line). Four new fixtures:
+
+| fixture | before | after |
+|---|---|---|
+| `CommentedWidget` | marker path clean at #1, but the commented link was picked up on the **empty tail pages** and appended at **#281** | tail genuinely empty; #1 unchanged |
+| `CommentedWidgetNoMarker` | **#1 and #2 both phantoms** | **#1 = first real product**; live link relegated to #281 |
+| `PhantomTopK` | phantom at **#1, saved silently** | **PHANTOM-SUSPECT, not saved** |
+| `NarrowMarker` (2-week) | week 2's 3-product sub-grid **saved over a 280-product store** | **COVERAGE-COLLAPSE, not saved** |
+
+`CommentedWidget`'s "before" column is the load-bearing one: **with Fix 1 alone the phantom does not
+disappear, it migrates to the tail** (page 1 is marker-scoped, so the tail pages' empty scoped slice
+falls back to the whole page and finds it there) — where `writeCompetitorTab()`'s never-delete
+behaviour would have preserved it as a bottom-ranked "Active" row forever. That is why Fix 1 was not
+sufficient on its own.
+
+Offline replay on the **real** saved Cristalli page-1 body: pre-fix code with the Dawn markers
+neutralised returns **13 handles, `pakket-bescherming` at rank 1**; this code returns the 12 real
+products via the `main` tier — and **still** returns them with `<main>` neutralised too, i.e. Fix 2
+alone suffices. **The fix does not depend on Fix 1.** Replay on the real Belro page-1, page-2 and
+title-ascending bodies: path flips `page → main`, handles **byte-identical in count and order** —
+Fix 3 is a no-op on a clean fallback store.
+
+**Remediation (Option 1 — Chris's call).** The four stored snapshots were rewritten: phantom row
+dropped, every remaining rank decremented by 1, `rankedCount` −1, **every other field untouched**.
+Ranked counts 19,899→19,898 / 20,169→20,168 / 20,177→20,176 / 20,176→20,175. A one-off script
+outside the repo refused to write until every assertion passed on every file (exactly one phantom,
+at rank 1, rank-only in shape, sole holder of rank 1, ranks contiguous before and after, no handle
+lost but the phantom, every surviving row identical except an exact −1 rank shift, and `rankedCount`
+the **only** top-level field to move). Originals archived **outside `data/`** at
+
+```
+~/scout-archive/cristallischwiiz-pre-phantom-fix-20260904/
+```
+
+byte-verified against the independent pre-flight copies in `backups/`. `JSON.stringify(JSON.parse(x))`
+round-trips the originals byte-for-byte, so the only bytes that differ are the intended ones.
+`coverage` was left stale by design (brief said "every other field untouched") — it is off by
+~0.005% and its only reader of a **prior** snapshot's value, `competitors.js`'s history line, rounds
+to 100% either way.
+
+**Simulated 2026-09-07 with zero store-side movement, measured not assumed:** against the rewritten
+history **0 up / 0 down / 0 new / 0 removed**. Against the archived originals: **20,175 "up", 1
+removed, hot streaks 26** — the one-week "everything −1" column Option 2 would have produced,
+reproducing the 2026-09-03 report's prediction exactly and cross-validating both it and the rewrite.
+
+**Sheet.** Row **444** of tab `CristalliSchwiiz` (gid 1880147949) — matched on **handle**, not row
+number, verified as `Pakket Bescherming` / This Week Rank 1 / Status Active before deleting, and the
+sole match — deleted via `deleteDimension`. Read-back: 21,729 → 21,728 rows, zero
+`pakket-bescherming` rows, lowest This Week Rank now
+`adjustable-pedestal-fan-with-3d-oscillation-aerion`, which is the rewritten 08-31 snapshot's #1.
+**Its cell reads `2`, not `1`** — every other rank cell keeps its +1 until Monday's run rewrites the
+tab. Expected; deliberately not touched. This was the session's only Sheet write.
+
+**Governance — decided, and only half-applied.** Scout's AGENTS.md said "No shell access beyond the
+three scoped scripts". The platform did not enforce it: `tools.deny` covers
+`sessions_yield`/`agent_to_agent`/`browser`/`canvas`, and `fs.workspaceOnly` binds only the fs
+tools, so `exec` was available the whole time. **A blanket `tools.deny: ["exec"]` is verified to
+work and was rejected on evidence** — Scout's *legitimate* job is exec-based (`query.js --list`,
+`--summary`, `competitors.js --add/--disable`, `openclaw cron run`), so denying `exec` outright
+would silently stop it answering the team. The correct fix is an **allow-list** scoped to those
+commands, and it was **not applied** because the enabling knob is unverified for 2026.7.1: the
+`tools/exec-approvals` page calls `tools.exec.mode` "the preferred normalized surface"
+(`deny`/`allowlist`/`ask`/`auto`/`full`) while the `gateway/config-tools` reference lists the
+`tools.exec` fields **without `mode`** and says it "appears to be a global-only setting";
+`exec-approvals-advanced` places allow-lists "in the host-local approvals document under
+`agents.<id>.allowlist`" but **does not document its path** (it is `~/.openclaw/exec-approvals.json`,
+found by `ls`, and it carries a live socket token); and every documented per-agent key path is
+`agents.entries.*`, which is not this install's shape (`agents.list[]`). Stopgap shipped instead: a
+blunt "**You do not edit anything. Ever.**" section at the top of Scout's AGENTS.md plus a Red Lines
+back-reference (workspace repo `0079bc3`, local-only — that repo has no remote). **The allow-list is
+the #1 open item** and must be validated by a live Discord round-trip on a **Tuesday or later**,
+never before a Monday batch. The weekly batches are cron `payload.kind: "command"` run by the
+gateway, **not** the agent's `exec` tool, so no exec-policy change can affect a batch run either way.
+
+**Palantir: not touched.** Its `~/scripts/competitor-tracker/lib.js` still has the three original
+markers and none of Fixes 2–5 (no comment stripping, no `<main>` tier, no `phantomSuspect`, no
+`coverageCollapse`, no extracted `isIncomplete()`, no `RANK_EMPTY_PAGE_TOLERANCE`). It tracks
+`Belro` and `DriftAndTide` — shared with Scout, both clean — and neither Cristalli nor HausOfMode.
+Port Fixes 2, 3 and 5 after 2026-09-07 validates them here; the Dawn markers only after the Sep 7
+blast-radius check.
+
+**Left open.** (1) The exec allow-list above. (2) **Scoping is decided on page 1 and not made
+sticky**: when a later page's scoped slice comes back empty, extraction silently falls back to the
+whole page for that page, which is how `CommentedWidgetNoMarker`'s live link still reaches #281. Not
+changed here — it would alter tail behaviour for every store days before a batch — but it is now
+visible in the logs and asserted in a fixture. (3) Fix 5 gets **stuck** on a store that legitimately
+halves; recovery procedure is in SKILL.md. (4) NouveauRiche's 2026-08-24 week ranked **52.6%** of its
+prior week — a real, saved, legitimate-looking drop **2.6 points** above Fix 5's floor. The threshold
+was not changed (Chris's call), but it is the one number worth revisiting. Note also that
+NouveauRiche is **no longer blocked-genuine** — it has four saved snapshots (833→804→423→390); the
+standing "Tier 3 Blocked" note in the orientation material is stale.
+
+Full writeup: `~/reports/Scout-Cristalli-Fix-Applied-2026-09-03.md`.
