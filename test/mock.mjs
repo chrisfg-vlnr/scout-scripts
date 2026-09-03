@@ -116,6 +116,87 @@ function route(urlStr) {
     return mk(200, grid(slice), HTMLH);                  // empty grid past the end -> clean stop
   }
 
+  // ── 2026-09-03 fixtures: commented links, phantoms, and an over-narrow marker ──────────
+  // Shaped like a real Shopify theme rather than like the bare `grid()` above: sitewide furniture
+  // (cart drawer inside <header>) comes BEFORE <main>, and the collection grid lives inside it.
+  // That byte order is the whole mechanism behind both contamination incidents this tracker has
+  // had (HausOfMode 2026-08-05, CristalliSchwiiz 2026-09-03), and `grid()` cannot express it.
+  //   commented — a link the merchant/app left inside an HTML comment (Fix 2's target)
+  //   live      — a real link in the drawer, outside <main> (Fix 3's target; comments can't help)
+  //   gridId    — the id on the grid container: a known marker, or one nothing recognises
+  //   narrow    — an extra `id="product-grid"` block placed AFTER the real grid but still inside
+  //               <main>: a marker that matches in the wrong place and scopes the crawl down to a
+  //               handful of products (Fix 5's target)
+  //   main      — false renders the same page with no <main> element at all, the theme shape
+  //               where the <main> tier cannot help and whole-page extraction is all there is
+  const themedPage = ({ commented = null, live = null, gridId = 'CollectionGridUnknown',
+                        grid: gridHandles = [], narrow = null, main = true }) => {
+    const links = hs => hs.map(h => `<a href="/products/${h}">x</a>`).join('');
+    const drawer = `<div class="cart-drawer">`
+      + (commented ? `<!--<a href="/collections/all/products/${commented}">--> <b>Sicherheitspaket</b>` : '')
+      + (live ? `<a href="/collections/all/products/${live}">Add protection</a>` : '')
+      + `</div>`;
+    const inner = `<div id="${gridId}">${links(gridHandles)}</div>`
+      + (narrow ? `<div id="product-grid">${links(narrow)}</div>` : '');
+    return `<html><body><header>${drawer}</header>`
+      + (main ? `<main>${inner}</main>` : inner)
+      + `<footer></footer></body></html>`;
+  };
+
+  // CommentedWidget      marker path, commented phantom in the drawer. The marker sits after the
+  //                      phantom in byte order, so page 1 was already clean before 2026-09-03 —
+  //                      this is the regression guard that Fixes 2/3 do not disturb the marker
+  //                      path. The difference shows up on the TAIL pages, where the grid is empty,
+  //                      the scoped slice yields nothing and extraction falls back to the whole
+  //                      page: before Fix 2 the commented link was picked up there and appended as
+  //                      the last rank; after it, the tail pages are genuinely empty.
+  // CommentedWidgetNoMarker  same page with an unrecognised grid id, plus a SECOND phantom that is
+  //                      live markup rather than commented out. Before: both lead the ranking.
+  //                      After: Fix 2 removes the commented one and Fix 3's <main> slice removes
+  //                      the live one from page 1 — neither fix alone does both. The live link
+  //                      still lands at the tail (same empty-page fallback as above), which is the
+  //                      honest, currently-accepted behaviour and is asserted, not hidden.
+  if (FIX === 'commentedwidget' || FIX === 'commentedwidgetnomarker') {
+    const NM = FIX === 'commentedwidgetnomarker';
+    const H = Array.from({ length: 280 }, (_, i) => `cw-${scramble(i)}`);
+    if (isJson) return mk(200, products(H), JSONH);
+    return mk(200, themedPage({
+      commented: 'cw-commented-phantom',
+      live: NM ? 'cw-live-phantom' : null,
+      gridId: NM ? 'CollectionGridUnknown' : 'ProductGridContainer',
+      grid: H.slice((page - 1) * 28, page * 28),
+    }), HTMLH);
+  }
+
+  // PhantomTopK  no <main> anywhere and no known marker, so every tier of extractGridHandles()
+  //              degrades to the whole page and the live drawer link genuinely reaches rank 1 —
+  //              the CristalliSchwiiz shape with nothing left to catch it but Fix 4. The handle is
+  //              absent from products.json, exactly like `pakket-bescherming`.
+  if (FIX === 'phantomtopk') {
+    const H = Array.from({ length: 280 }, (_, i) => `pk-${scramble(i)}`);
+    if (isJson) return mk(200, products(H), JSONH);
+    return mk(200, themedPage({
+      live: 'pk-phantom-widget', main: false,
+      grid: H.slice((page - 1) * 28, page * 28),
+    }), HTMLH);
+  }
+
+  // NarrowMarker  two-week. Week 1 is an ordinary clean crawl of 280 products with no known
+  //               marker. Week 2 adds an `id="product-grid"` block of 3 products AFTER the real
+  //               grid — a marker matching in the wrong place, which scopes the crawl down to
+  //               those 3. Nothing about that run looks broken from the inside: not capped, not
+  //               partial, no redirect, and n=3 is below the sort guard's minimum. It is the
+  //               shape the 2026-08-31 marker commit could produce on any of the nine fallback
+  //               stores nobody has checked, and only the coverage-collapse gate refuses it.
+  if (FIX === 'narrowmarker') {
+    const H = Array.from({ length: 280 }, (_, i) => `nm-${scramble(i)}`);
+    if (isJson) return mk(200, products(H), JSONH);
+    return mk(200, themedPage({
+      grid: H.slice((page - 1) * 28, page * 28),
+      narrow: process.env.WEEK === '2' ? H.slice(0, 3) : null,
+    }), HTMLH);
+  }
+
   if (FIX === 'emptygrid') {
     // Catalog 401 (no redirect anywhere), rank pages 200-but-empty. The shape that produced
     // the self-contradicting 'Tier 2-partial (catalog only, no rank) | catalog 0' label.

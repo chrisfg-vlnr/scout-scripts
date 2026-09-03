@@ -298,6 +298,20 @@ function isPasswordGateUrl(u) {
 
 const HREF_PRODUCT_RE = /href="[^"]*?\/products\/([a-z0-9][a-z0-9\-_%]*)(?:[?#][^"]*)?"/gi;
 
+// HTML comments are stripped before the href regex runs (2026-09-03, "Fix 2"). HREF_PRODUCT_RE is
+// a bare byte regex with no notion of what is live markup and what is commented out, and on
+// CristalliSchwiiz a commented-out cart-drawer link —
+//   <!--<a href="/collections/all/products/pakket-bescherming">--> <b>Sicherheitspaket</b>
+// sitting ~80KB before <main> — was extracted as rank 1 on EVERY page of EVERY crawl since at
+// least 2026-08-10, so every real product was recorded one rank too low and the Sheet's #1 for
+// that store was a handle that 404s (2026-09-03 rank-integrity report, S2). A commented-out link
+// is by definition never a visible grid item, so removing comments can never drop a real ranked
+// product: blast radius on rendered content is nil. Non-greedy and anchored on a closing `-->`,
+// so an unterminated `<!--` (malformed markup) strips nothing rather than swallowing the page.
+// This is mechanism-specific and independent of container scoping: it would have prevented the
+// Cristalli contamination on the whole-page fallback path with no marker involved at all.
+const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
+
 // Candidate container markers for the real collection-grid section, tried in order. Themes vary
 // — this is a list to try, not a single hardcoded shape. Confirmed present in HausOfMode's markup
 // (2026-08-05 investigation, see primer's Execution Log): the OLD whole-page regex below was
@@ -320,8 +334,9 @@ function extractHandlesFromSlice(html) {
   const seen = new Set();
   const ordered = [];
   let m;
+  const visible = html.replace(HTML_COMMENT_RE, '');
   HREF_PRODUCT_RE.lastIndex = 0;
-  while ((m = HREF_PRODUCT_RE.exec(html)) !== null) {
+  while ((m = HREF_PRODUCT_RE.exec(visible)) !== null) {
     const h = decodeURIComponent(m[1]).toLowerCase();
     if (!seen.has(h)) { seen.add(h); ordered.push(h); }
   }
@@ -347,10 +362,36 @@ export function extractGridHandles(html) {
     const endIdx = endMatch ? startIdx + endMatch.index : html.length;
     const scopedHandles = extractHandlesFromSlice(html.slice(startIdx, endIdx));
     if (scopedHandles.length > 0) {
-      return { handles: scopedHandles, scoped: true, marker: marker.source };
+      return { handles: scopedHandles, scoped: true, marker: marker.source, scopePath: 'marker' };
     }
   }
-  return { handles: extractHandlesFromSlice(html), scoped: false, marker: null };
+  // Middle tier, added 2026-09-03 ("Fix 3"): no known container marker matched, so before giving
+  // up and reading the whole page, read only <main>…</main>. Shopify themes render the collection
+  // template into <main> (`content_for_layout`); the sitewide furniture that has caused BOTH
+  // contamination incidents so far — HausOfMode's cart-drawer upsell block (2026-08-05) and
+  // CristalliSchwiiz's package-protection widget (2026-09-03) — sits in the header/drawer BEFORE
+  // <main>. Belro's saved page-1 body carries zero product links outside <main> on either sort or
+  // on page 2, so this narrows nothing on a clean store. A theme that renders its grid OUTSIDE
+  // <main> degrades to the whole-page behaviour below the moment the slice comes back empty; a
+  // theme that keeps a lone stray link inside <main> and its grid outside would narrow wrongly,
+  // and that is what the coverage-collapse gate in buildSnapshot() exists to catch loudly rather
+  // than save. Deliberately NOT ratio-guarded against the whole-page count: a header mega-menu
+  // with more links than a 12-24 item grid page is exactly the case this is for.
+  const mainStart = /<main[\s>]/i.exec(html);
+  if (mainStart) {
+    const startIdx = mainStart.index;
+    const endMatch = /<\/main/i.exec(html.slice(startIdx));
+    const endIdx = endMatch ? startIdx + endMatch.index : html.length;
+    const mainHandles = extractHandlesFromSlice(html.slice(startIdx, endIdx));
+    if (mainHandles.length > 0) {
+      // `scoped` stays FALSE here on purpose: it means "a known container marker for this theme
+      // matched", the exact sense the four stored snapshots and every prior run log carry, and an
+      // Aug-31-vs-Sep-7 comparison of that field must keep meaning the same thing. The three-way
+      // path lives in its own field.
+      return { handles: mainHandles, scoped: false, marker: null, scopePath: 'main' };
+    }
+  }
+  return { handles: extractHandlesFromSlice(html), scoped: false, marker: null, scopePath: 'page' };
 }
 
 function makeJunkMatcher(patterns) {
@@ -398,7 +439,7 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
   // Grid-scoping visibility (2026-08-05 fix): decided from page 1 and logged once per
   // competitor per run, rather than per page, since 300+ pages would otherwise flood the log —
   // silent fallback is exactly how the original cart-drawer-contamination bug went unnoticed.
-  let gridScopeChecked = false, gridScopeOk = false, gridScopeMarker = null;
+  let gridScopeChecked = false, gridScopeOk = false, gridScopeMarker = null, gridScopePath = null;
 
   while (page <= cap) {
     const url = `${base}/collections/${col}?sort_by=best-selling&page=${page}`;
@@ -430,14 +471,18 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
       // pagination, same as an empty grid below.
       break;
     }
-    const { handles: pageHandles, scoped, marker } = extractGridHandles(r.text);
+    const { handles: pageHandles, scoped, marker, scopePath } = extractGridHandles(r.text);
     if (!gridScopeChecked) {
       gridScopeChecked = true;
       gridScopeOk = scoped;
       gridScopeMarker = marker;
-      console.error(`    [${competitor.name}] grid extraction: ${scoped ? `scoped via marker ${marker}` : 'FALLBACK — no known container marker matched; using whole-page extraction (same behavior as before this fix)'}`);
-    } else if (scoped !== gridScopeOk) {
-      console.error(`    [${competitor.name}] grid extraction: page ${page} scoping ${scoped ? 'succeeded' : 'failed'} — differs from page 1's result`);
+      gridScopePath = scopePath;
+      console.error(`    [${competitor.name}] grid extraction: ${
+        scopePath === 'marker' ? `scoped via marker ${marker}`
+        : scopePath === 'main' ? 'scoped to <main> — no known container marker matched (2026-09-03 middle-tier fallback)'
+        : 'FALLBACK — no known container marker matched and no usable <main>; using whole-page extraction (same behavior as before this fix)'}`);
+    } else if (scopePath !== gridScopePath) {
+      console.error(`    [${competitor.name}] grid extraction: page ${page} took the '${scopePath}' path — differs from page 1's '${gridScopePath}'`);
     }
     let added = 0;
     for (const h of pageHandles) {
@@ -455,7 +500,14 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
     // every empty page precisely so the next occurrence is diagnosable rather than inferred.
     if (added === 0) {
       emptyOrDupPages++;
-      console.error(`    [${competitor.name}] rank scrape page ${page}: 0 new handles (${pageHandles.length} on page, ${ranked.length} ranked so far) — empty/duplicate page ${emptyOrDupPages}/${RANK_EMPTY_PAGE_TOLERANCE}.`);
+      // Naming the handles, not just counting them, is the 2026-09-03 companion to the phantom
+      // guard: Cristalli's tail pages logged "1 handle on page" every week from 2026-08-24 and
+      // nobody could tell from that line that the one handle was the same sitewide widget link
+      // appearing on all 1,685 pages. A handle that survives to a page past the end of the
+      // catalogue is page-independent by definition — i.e. it is furniture, not a product.
+      const onPage = pageHandles.length
+        ? ` [${pageHandles.slice(0, 5).join(', ')}${pageHandles.length > 5 ? `, +${pageHandles.length - 5} more` : ''}]` : '';
+      console.error(`    [${competitor.name}] rank scrape page ${page}: 0 new handles (${pageHandles.length} on page${onPage}, ${ranked.length} ranked so far) — empty/duplicate page ${emptyOrDupPages}/${RANK_EMPTY_PAGE_TOLERANCE}.`);
       if (emptyOrDupPages >= RANK_EMPTY_PAGE_TOLERANCE) {
         console.error(`    [${competitor.name}] rank scrape: ${RANK_EMPTY_PAGE_TOLERANCE} consecutive empty/duplicate pages ending at page ${page} — treating as end of catalog at ${ranked.length} ranked.`);
         break;
@@ -478,7 +530,7 @@ export async function scrapeBestsellerRanks(competitor, cfg) {
     capped = true;
     error = `rank scrape hit the ${cap}-page cap while still finding new products — coverage incomplete (raise this store's maxRankPages)`;
   }
-  return { ok: ranked.length > 0 && !blocked, blocked, partial, capped, cap, passwordGated, handles: ranked, pages: page - 1, error, urlIntegrityFail, urlIntegrityDetail, gridScoped: gridScopeOk, gridScopeMarker };
+  return { ok: ranked.length > 0 && !blocked, blocked, partial, capped, cap, passwordGated, handles: ranked, pages: page - 1, error, urlIntegrityFail, urlIntegrityDetail, gridScoped: gridScopeOk, gridScopeMarker, gridScopePath };
 }
 
 // ─── sort-integrity check (alphabetical-fallback detector) ────────────────────
@@ -609,6 +661,48 @@ export async function detectTier(competitor, cfg) {
 //   products: [ { handle, title, productType, url, rank, price } ] }
 //   // rank: 1..N or null (unranked); price: first-variant number or null (rank-only/Tier-2
 //   // synthesized entries, and any entry Shopify didn't send a parseable price for)
+// ─── phantom-in-top-K guard (2026-09-03, "Fix 4") ─────────────────────────────
+// A handle that the HTML grid ranks but products.json does not list is a "rank-only synthesized
+// entry" — buildSnapshot() still gives it a row (see the merge below), because a real product the
+// .json view filtered out is a real product. Near the BOTTOM of a 20,000-product ranking that is
+// unremarkable. At rank 1 it is not: it means something that is not a purchasable listing is being
+// reported to the team as the store's best seller. CristalliSchwiiz carried exactly that from at
+// least 2026-08-10 to 2026-08-31 — `pakket-bescherming`, price null, HTTP 404 as a product page,
+// rank 1 in all four stored snapshots and row 444 of the Sheet — and NOTHING in the guard set
+// looked at it: sortSuspect measures ORDER, not membership, and its full-catalog ρ was −0.043.
+// Cheap, exact, and it would have fired on the very first contaminated week.
+// Honest limit: this would NOT have caught HausOfMode (2026-08-05), whose ~50 contaminating
+// entries were genuine catalog members surfaced from a cart-drawer widget. Different mechanism,
+// different guard (grid scoping); this one is not a substitute for it.
+const PHANTOM_TOP_K = 50;
+// The check reads "absent from products.json" as evidence, which is only sound while products.json
+// is a trustworthy membership authority for this store. When a large share of the ranked grid is
+// missing from the catalog, it is the CATALOG that is incomplete, not the grid that is haunted, so
+// absence carries no signal and the check would fire on every such store forever. Real stores sit
+// at ~0% (Belro 0 of 4,488; Cristalli 1 of 20,176 = 0.005%); the fixtures whose mock catalog is
+// deliberately a tiny fraction of their mock grid sit above 90%. 10% is nowhere near either.
+const PHANTOM_CATALOG_TRUST_MAX_RANKONLY_FRAC = 0.10;
+
+// ─── coverage-collapse gate (2026-09-03, "Fix 5") ─────────────────────────────
+// Palantir got this class of guard after its 2026-07-27 silent-coverage-collapse incident; Scout
+// had only a console warning at `coverage < 0.6`, which still SAVED the snapshot as the week's
+// trusted baseline. A run that suddenly ranks less than half of what the last good week ranked,
+// while claiming to have finished cleanly (not capped, not partial — those states describe their
+// own truncation honestly and are handled above), is making an assertion about the store that is
+// far more likely to be about us: a scoping change that narrowed too far, a theme edit, a silent
+// wall. This is specifically the safety net for the 2026-08-31 marker commit and the <main>
+// fallback above, whose blast radius across the nine other fallback-path stores is UNVERIFIED
+// going into 2026-09-07 — a narrowed grid shows up here as a collapse and is refused, instead of
+// overwriting a good baseline with a fraction of a store and reporting the remainder as "Removed
+// From Store" next week.
+// KNOWN AND ACCEPTED: a store that legitimately shrinks by more than half stays flagged every week,
+// because the refused snapshot never advances the baseline it is compared against. That is the
+// intended failure direction (loud and stuck beats silent and wrong); the manual recovery is in
+// SKILL.md — archive the stale snapshots outside data/ and re-run the batch through
+// `openclaw cron run`. Deliberately NOT a config.json threshold: Scout edits config.json live on
+// external Discord requests, and a guard an untrusted user can dial down is not a guard.
+const COVERAGE_COLLAPSE_FRAC = 0.50;
+
 export async function buildSnapshot(competitor, cfg, date) {
   const out = {
     competitor: competitor.name,
@@ -631,6 +725,16 @@ export async function buildSnapshot(competitor, cfg, date) {
     closed: false,
     sortSuspect: false,
     sortSuspectStats: null,
+    // A rank-only synthesized entry (handle ranked in HTML, absent from products.json) sits inside
+    // the top PHANTOM_TOP_K. Treated like sortSuspect: real-looking, believed wrong, NOT saved.
+    phantomSuspect: false,
+    phantomSuspectDetail: null,
+    // rankedCount collapsed below COVERAGE_COLLAPSE_FRAC of the last saved week's, on a run that
+    // reported neither `capped` nor `partial`. Also not saved.
+    coverageCollapse: false,
+    coverageCollapseDetail: null,
+    priorRankedCount: null,
+    priorSnapshotDate: null,
     error: null,
     catalogCount: 0,
     rankedCount: 0,
@@ -643,6 +747,10 @@ export async function buildSnapshot(competitor, cfg, date) {
     // in the snapshot JSON, not just in logs.
     gridScoped: false,
     gridScopeMarker: null,
+    // 'marker' | 'main' | 'page' — which of extractGridHandles()'s three tiers page 1 took. Added
+    // 2026-09-03 alongside the <main> middle tier; `gridScoped` keeps its original narrower sense
+    // ("a known container marker matched") so it stays comparable with pre-2026-09-03 snapshots.
+    gridScopePath: null,
     products: [],
   };
 
@@ -650,6 +758,7 @@ export async function buildSnapshot(competitor, cfg, date) {
   const ranks   = await scrapeBestsellerRanks(competitor, cfg);
   out.gridScoped = ranks.gridScoped;
   out.gridScopeMarker = ranks.gridScopeMarker;
+  out.gridScopePath = ranks.gridScopePath;
 
   // Checked before the blocked case: a password-gated store produces block-SHAPED symptoms
   // (products.json 401, no rank data) but is not a block on us at all, and reporting it as one
@@ -682,8 +791,13 @@ export async function buildSnapshot(competitor, cfg, date) {
 
   // Any handle that is ranked in HTML but missing from JSON catalog still gets a row
   // (real product the .json view filtered out), with a prettified fallback title.
+  // Handles the HTML grid ranked that products.json never listed. Collected here rather than
+  // recomputed later because this loop is the only place that knows it, and the phantom guard
+  // below needs the list, not just the count.
+  const rankOnlyHandles = [];
   for (const h of rankMap.keys()) {
     if (!metaByHandle.has(h)) {
+      rankOnlyHandles.push(h);
       metaByHandle.set(h, {
         handle: h,
         title: h.replace(/[-_]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
@@ -789,6 +903,49 @@ export async function buildSnapshot(competitor, cfg, date) {
     }
   }
 
+  // ── Fix 4: phantom in the top K ────────────────────────────────────────────
+  // Same gate as the sort check above, and for the same reasons: a blocked/partial/truncated run
+  // has either too little rank data or a catalogue that is incomplete BY CONSTRUCTION, and in the
+  // truncated case every ranked handle past Shopify's ceiling would look like a phantom.
+  if (!out.blocked && !out.partial && !out.catalogTruncated && rankOnlyHandles.length) {
+    const frac = out.rankedCount > 0 ? rankOnlyHandles.length / out.rankedCount : 0;
+    if (frac > PHANTOM_CATALOG_TRUST_MAX_RANKONLY_FRAC) {
+      console.error(`    [${competitor.name}] phantom check SKIPPED: ${rankOnlyHandles.length} of ${out.rankedCount} ranked handles (${(frac * 100).toFixed(0)}%) are absent from products.json — the catalog is not a reliable membership authority for this store, so "absent from the catalog" carries no signal here.`);
+    } else {
+      const inTopK = rankOnlyHandles
+        .map(h => ({ handle: h, rank: rankMap.get(h) }))
+        .filter(x => x.rank != null && x.rank <= PHANTOM_TOP_K)
+        .sort((a, b) => a.rank - b.rank);
+      if (inTopK.length) {
+        const listed = inTopK.slice(0, 5).map(x => `#${x.rank} ${x.handle}`).join(', ');
+        const detail = `${inTopK.length} top-${PHANTOM_TOP_K} rank(s) held by handle(s) absent from products.json: ${listed}${inTopK.length > 5 ? `, +${inTopK.length - 5} more` : ''} — a ranked handle with no catalog entry and no price is a widget/app link, not a best seller`;
+        out.phantomSuspect = true;
+        out.phantomSuspectDetail = detail;
+        out.tier += ` — PHANTOM-SUSPECT (a top-${PHANTOM_TOP_K} rank is held by a handle that is not a catalog product)`;
+        out.error = [out.error, detail].filter(Boolean).join(' | ');
+        console.error(`    [${competitor.name}] PHANTOM-SUSPECT: ${detail}`);
+      }
+    }
+  }
+
+  // ── Fix 5: coverage collapse against the last saved week ───────────────────
+  // `capped` and `partial` are excluded because both already say, in their own words, that this
+  // week's rank depth is short and why. What is left is a run that believes it finished cleanly.
+  if (!out.blocked && !out.partial && !out.catalogTruncated && !out.capped) {
+    const prior = (await loadSnapshots(competitor.name)).find(s => s.date !== date && s.rankedCount > 0);
+    if (prior && out.rankedCount < prior.rankedCount * COVERAGE_COLLAPSE_FRAC) {
+      const pct = prior.rankedCount > 0 ? (out.rankedCount / prior.rankedCount * 100).toFixed(1) : '0';
+      const detail = `ranked ${out.rankedCount} vs ${prior.rankedCount} in the last saved week (${prior.date}) — ${pct}% of it, below the ${(COVERAGE_COLLAPSE_FRAC * 100).toFixed(0)}% floor, on a run that reported neither capped nor partial`;
+      out.coverageCollapse = true;
+      out.coverageCollapseDetail = detail;
+      out.priorRankedCount = prior.rankedCount;
+      out.priorSnapshotDate = prior.date;
+      out.tier += ' — COVERAGE-COLLAPSE (ranked far fewer products than the last good week)';
+      out.error = [out.error, detail].filter(Boolean).join(' | ');
+      console.error(`    [${competitor.name}] COVERAGE-COLLAPSE: ${detail}`);
+    }
+  }
+
   return out;
 }
 
@@ -807,13 +964,23 @@ export async function buildSnapshot(competitor, cfg, date) {
 //   sortSuspect     — coverage-complete but believed MISORDERED (alphabetical, not sales-
 //                     ranked); saving it replaces a known-good rank baseline with noise that
 //                     looks exactly like real data. Chris's explicit call 2026-08-05.
+//   phantomSuspect  — a top-50 rank is held by a handle products.json does not list, i.e. the
+//                     leading ranks are contaminated by page furniture; every real product below
+//                     it is off by the number of phantoms above it. Same reasoning as sortSuspect
+//                     — the ORDER is wrong in a way a saved snapshot's shape would never reveal.
+//                     Chris's call 2026-09-03.
+//   coverageCollapse— ranked less than half of the last saved week on a run that reported neither
+//                     capped nor partial; the membership list is almost certainly ours, not the
+//                     store's, and saving it would report the missing half as "Removed From
+//                     Store". Chris's call 2026-09-03.
 // Extracted to lib.js 2026-08-21: index.js and competitors.js --add each carried their OWN copy
 // of this expression and they had already drifted — competitors.js checked only
 // `blocked || partial`, so a --add whose baseline came back sort-suspect saved it anyway. One
 // predicate, both call sites, no drift.
 export function isIncomplete(snapshot) {
   return !!(snapshot.blocked || snapshot.partial || snapshot.catalogTruncated
-            || snapshot.closed || snapshot.sortSuspect);
+            || snapshot.closed || snapshot.sortSuspect
+            || snapshot.phantomSuspect || snapshot.coverageCollapse);
 }
 
 // Short label for the incomplete state, for logs / Sheet markers / report routing.
@@ -822,6 +989,8 @@ export function incompleteLabel(snapshot) {
   if (snapshot.closed) return 'CLOSED';
   if (snapshot.catalogTruncated) return 'CATALOG-TRUNCATED';
   if (snapshot.sortSuspect) return 'SORT-SUSPECT';
+  if (snapshot.coverageCollapse) return 'COVERAGE-COLLAPSE';
+  if (snapshot.phantomSuspect) return 'PHANTOM-SUSPECT';
   if (snapshot.partial) return 'PARTIAL';
   return null;
 }

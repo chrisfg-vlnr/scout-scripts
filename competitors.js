@@ -229,6 +229,15 @@ async function doAdd(name, url, collection) {
       CLOSED: 'the store is password-protected (closed to visitors) — nothing to capture',
       'CATALOG-TRUNCATED': `too large to list — this store has more than ${(snapshot.catalogTruncatedAt ?? 25000).toLocaleString('en-US')} products and Shopify will not paginate past that`,
       'SORT-SUSPECT': 'sort-suspect (the recorded order looks alphabetical, not sales-ranked)',
+      // PHANTOM-SUSPECT is reachable from --add: a store whose theme puts a cart/upsell widget
+      // link ahead of the grid contaminates its very first baseline, which is exactly what
+      // happened to CristalliSchwiiz and went unnoticed for six weeks. COVERAGE-COLLAPSE is not
+      // reachable here (it compares against a previous saved week and --add has none by
+      // definition), but it is listed so this map can never fall through to `undefined` — an
+      // external Discord user reading "Baseline snapshot undefined" is a worse outcome than a
+      // line that is merely never printed.
+      'PHANTOM-SUSPECT': 'phantom-suspect (one of the top ranks is held by something absent from the store\'s own product list — a cart or upsell widget link, not a product)',
+      'COVERAGE-COLLAPSE': 'coverage-collapse (far fewer products ranked than the previous good week)',
       PARTIAL: 'partial (a mid-crawl wall stopped it early)',
     }[incompleteLabel(snapshot)];
     console.log(`⚠️  Baseline snapshot ${reason} (${snapshot.error || reason}) — no baseline saved. It'll get its first snapshot on the next weekly run instead.`);

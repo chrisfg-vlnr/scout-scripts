@@ -32,6 +32,33 @@
 #                                   2026-08-24 defect. After: context line + collapsed tie.
 #   SpreadDecliners spreaddecliners ordinary movement, max decline shared by only a few.
 #                                   REGRESSION GUARD: the list must still render in full.
+#
+# Extraction/guard fixtures added 2026-09-03 (report §7 Fixes 2-5). These print more than the
+# Tier line — the extraction path taken, the guard lines fired, and rank 1 / the last rank of any
+# saved snapshot — because for these the CLASSIFICATION is not the artefact under test, the
+# recorded ORDER is:
+#   CommentedWidget         commentedwidget          known marker + a commented-out drawer link.
+#                                                    Page 1 clean on both trees (regression guard
+#                                                    for the marker path); before Fix 2 the tail
+#                                                    pages pick the commented link up as the last
+#                                                    rank, after it they are genuinely empty.
+#   CommentedWidgetNoMarker commentedwidgetnomarker  unknown grid id, one commented AND one live
+#                                                    phantom in the drawer. Before: ranks 1-2 are
+#                                                    both phantoms. After: rank 1 is the first real
+#                                                    product — Fix 2 removes the commented one,
+#                                                    Fix 3's <main> slice the live one; neither
+#                                                    alone does both. The live link still lands at
+#                                                    the TAIL via the empty-page whole-page
+#                                                    fallback: asserted, not hidden (open item).
+#   PhantomTopK             phantomtopk              no <main>, no marker, live drawer link absent
+#                                                    from products.json reaches rank 1. Before:
+#                                                    saved, silently. After: PHANTOM-SUSPECT, not
+#                                                    saved.
+#   NarrowMarker            narrowmarker             TWO-WEEK. Week 2 grows an id="product-grid"
+#                                                    block of 3 products after the real 280-product
+#                                                    grid. Before: 3 ranked, SAVED — a whole store
+#                                                    replaced by a fragment. After: COVERAGE-
+#                                                    COLLAPSE, not saved.
 set -u
 REF="${1:-}"
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
@@ -60,6 +87,10 @@ c["competitors"] = [
   {"name":"EmptyGrid","baseUrl":"https://empty.example","collection":"all","enabled":True,"batch":"D","currency":None},
   {"name":"TiedDecliners","baseUrl":"https://tied.example","collection":"all","enabled":True,"batch":"D","currency":None},
   {"name":"SpreadDecliners","baseUrl":"https://spread.example","collection":"all","enabled":True,"batch":"D","currency":None},
+  {"name":"CommentedWidget","baseUrl":"https://cw.example","collection":"all","enabled":True,"batch":"D","currency":None},
+  {"name":"CommentedWidgetNoMarker","baseUrl":"https://cwnm.example","collection":"all","enabled":True,"batch":"D","currency":None},
+  {"name":"PhantomTopK","baseUrl":"https://ptk.example","collection":"all","enabled":True,"batch":"D","currency":None},
+  {"name":"NarrowMarker","baseUrl":"https://nm.example","collection":"all","enabled":True,"batch":"D","currency":None},
 ]
 json.dump(c, open(sys.argv[2] + "/config.json", "w"), indent=2)
 PY
@@ -95,6 +126,53 @@ run2week() {
     | grep -oE '\(\+[0-9]+\)' | sort -u | tr '\n' ' ')"
 }
 
+# Extraction runner: same single-week run as run(), but reports the artefacts that matter for an
+# ORDER bug rather than a classification bug — which extraction tier page 1 took, which guards
+# fired, and (when a snapshot was saved) the first and last ranks actually recorded.
+runrank() {
+  rm -rf "$T/data"
+  ( cd "$T" && FIXTURE="$2" node --import ./mock.mjs index.js --only "$1" \
+      --no-sheet --no-discord --no-prune 2>&1 ) > "$T/out.txt"
+  echo "--- $1"
+  grep -E "^  Tier" "$T/out.txt" | sed 's/^/    /'
+  grep -m1 "grid extraction:" "$T/out.txt" | sed 's/^ *\[[^]]*\] /    /'
+  local mism; mism="$(grep -c "differs from page 1" "$T/out.txt")" || true
+  [ "${mism:-0}" != "0" ] && echo "    page-path mismatch lines: $mism"
+  grep -E "PHANTOM-SUSPECT:|COVERAGE-COLLAPSE:|phantom check SKIPPED:" "$T/out.txt" \
+    | sed 's/^ *\[[^]]*\] /    /'
+  local saved; saved="$(ls "$T/data" 2>/dev/null | tr '\n' ' ')"
+  echo "    saved: ${saved:-<nothing>}"
+  if [ -n "$saved" ]; then
+    node -e '
+      const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      const r = s.products.filter(p => p.rank != null).sort((a, b) => a.rank - b.rank);
+      console.log(`    ranked ${s.rankedCount} | path ${s.gridScopePath} | #1 ${r[0].handle}`
+        + ` | #2 ${r[1] ? r[1].handle : "-"} | last #${r[r.length-1].rank} ${r[r.length-1].handle}`);
+    ' "$T/data/$(ls "$T/data" | head -1)"
+  fi
+  return 0
+}
+
+# Two-week extraction runner. Week 1 establishes a real baseline through the production
+# buildSnapshot/saveSnapshot path; week 2 is the run under test. Unlike run2week() this does NOT
+# grep for a movers list — the point of week 2 here is that it produces an INCOMPLETE report and
+# saves nothing, so there is no movers list to find.
+runnarrow() {
+  rm -rf "$T/data"
+  local w d
+  for w in 1 2; do
+    if [ "$w" = "1" ]; then d=2026-08-17; else d=2026-08-24; fi
+    ( cd "$T" && FIXTURE="$2" WEEK=$w node --import ./mock.mjs index.js --only "$1" \
+        --no-sheet --no-discord --no-prune --date $d ) > "$T/w$w.txt" 2>&1
+    echo "--- $1 week $w ($d)"
+    grep -E "^  Tier" "$T/w$w.txt" | sed 's/^/    /'
+    grep -m1 "grid extraction:" "$T/w$w.txt" | sed 's/^ *\[[^]]*\] /    /'
+    grep -E "PHANTOM-SUSPECT:|COVERAGE-COLLAPSE:" "$T/w$w.txt" | sed 's/^ *\[[^]]*\] /    /'
+    echo "    saved: $(ls "$T/data" 2>/dev/null | tr '\n' ' ')"
+  done
+  return 0
+}
+
 for f in "RedlichBecker redlichbecker" "BreuerMode breuermode" "GlitchPage glitchpage" \
          "EndAtCapMinus1 endatcapminus1" "CleanEnd cleanend" "EmptyGrid emptygrid"; do
   run $f
@@ -102,3 +180,8 @@ done
 for f in "TiedDecliners tieddecliners" "SpreadDecliners spreaddecliners"; do
   run2week $f
 done
+for f in "CommentedWidget commentedwidget" "CommentedWidgetNoMarker commentedwidgetnomarker" \
+         "PhantomTopK phantomtopk"; do
+  runrank $f
+done
+runnarrow NarrowMarker narrowmarker

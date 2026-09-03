@@ -183,6 +183,26 @@ function buildCompetitorReport(summary, prettyDate) {
       + `Not saved as this week's baseline. Store likely changed its default collection sort or its theme doesn't honor `
       + `sort_by — check the site directly before trusting next week's movers. Manual check recommended.`;
   }
+  if (summary.coverageCollapse) {
+    return `⚠️ **${name}** — COVERAGE COLLAPSE this week (${summary.tier}). We ranked only `
+      + `**${(summary.rankedCount ?? 0).toLocaleString('en-US')} products** against `
+      + `**${(summary.priorRankedCount ?? 0).toLocaleString('en-US')}** in the last good week `
+      + `(${summary.priorSnapshotDate ?? 'n/a'}) — less than half — and the crawl did not report `
+      + `hitting a page cap or a wall, so it believes it finished normally. A drop that size on a `
+      + `clean-looking run is far more likely to be something changing in how we read the page than `
+      + `the store deleting most of its catalog. Not saved as this week's baseline, so last week's `
+      + `numbers stand and nothing is reported as "Removed From Store". Needs a manual look before `
+      + `this store's ranks are trusted again — flag it to Chris.`;
+  }
+  if (summary.phantomSuspect) {
+    return `⚠️ **${name}** — PHANTOM IN THE TOP RANKS this week (${summary.tier}). Full coverage `
+      + `(${(summary.rankedCount ?? 0).toLocaleString('en-US')} ranked / ${(summary.catalogCount ?? 0).toLocaleString('en-US')} catalog), but one or more of `
+      + `the leading ranks is held by something the store's own product list does not contain — `
+      + `almost always a cart/upsell/app widget link picked up from the page furniture rather than `
+      + `from the bestseller grid, which pushes every real product down a place. `
+      + `${summary.phantomSuspectDetail ? `Detail: ${summary.phantomSuspectDetail}. ` : ''}`
+      + `Not saved as this week's baseline. Manual check recommended.`;
+  }
   if (summary.partial) {
     return `⚠️ **${name}** — PARTIAL this week (${summary.tier}). ${summary.rankedCount ?? 0} ranked / `
       + `${summary.catalogCount ?? 0} catalog before an early stop${summary.error ? ` — ${summary.error}` : ''}. `
@@ -289,6 +309,9 @@ async function run(args) {
           catalogTruncated: snapshot.catalogTruncated, catalogTruncatedAt: snapshot.catalogTruncatedAt,
           closed: snapshot.closed,
           sortSuspect: snapshot.sortSuspect, sortSuspectStats: snapshot.sortSuspectStats,
+          phantomSuspect: snapshot.phantomSuspect, phantomSuspectDetail: snapshot.phantomSuspectDetail,
+          coverageCollapse: snapshot.coverageCollapse, coverageCollapseDetail: snapshot.coverageCollapseDetail,
+          priorRankedCount: snapshot.priorRankedCount, priorSnapshotDate: snapshot.priorSnapshotDate,
           tier: snapshot.tier, error: snapshot.error,
           catalogCount: snapshot.catalogCount, rankedCount: snapshot.rankedCount,
         };
@@ -333,6 +356,24 @@ async function run(args) {
             url: comp.baseUrl, productType: '',
             lastRank: null, thisRank: null, wow: null,
             status: 'SortSuspect',
+            wk2Rank: null, wk3Rank: null, monthChange: null, streak: null, avgRank: null,
+            hotStreak: null, spike: null, consistentTop10: null,
+            price: null, currency: comp.currency ?? null,
+          } : snapshot.coverageCollapse ? {
+            handle: '__coverage_collapse__',
+            title: `⚠️ COVERAGE COLLAPSE — only ${snapshot.rankedCount.toLocaleString('en-US')} products ranked this week against ${(snapshot.priorRankedCount ?? 0).toLocaleString('en-US')} in the last good week (${snapshot.priorSnapshotDate ?? 'n/a'}), on a crawl that reported no cap and no wall; more likely a change in how we read the page than the store; not saved as this week's baseline, so the rows below are last week's. Manual check needed.`,
+            url: comp.baseUrl, productType: '',
+            lastRank: null, thisRank: null, wow: null,
+            status: 'CoverageCollapse',
+            wk2Rank: null, wk3Rank: null, monthChange: null, streak: null, avgRank: null,
+            hotStreak: null, spike: null, consistentTop10: null,
+            price: null, currency: comp.currency ?? null,
+          } : snapshot.phantomSuspect ? {
+            handle: '__phantom_suspect__',
+            title: `⚠️ PHANTOM IN THE TOP RANKS — ${snapshot.phantomSuspectDetail ?? 'a leading rank is held by a handle absent from the store product list'}; that is page furniture (cart/upsell widget), not a best seller, and it pushes every real product down a place; not saved as this week's baseline. Manual check recommended.`,
+            url: comp.baseUrl, productType: '',
+            lastRank: null, thisRank: null, wow: null,
+            status: 'PhantomSuspect',
             wk2Rank: null, wk3Rank: null, monthChange: null, streak: null, avgRank: null,
             hotStreak: null, spike: null, consistentTop10: null,
             price: null, currency: comp.currency ?? null,
