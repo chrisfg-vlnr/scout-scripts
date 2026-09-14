@@ -1463,3 +1463,17 @@ NouveauRiche is **no longer blocked-genuine** — it has four saved snapshots (8
 standing "Tier 3 Blocked" note in the orientation material is stale.
 
 Full writeup: `~/reports/Scout-Cristalli-Fix-Applied-2026-09-03.md`.
+
+### 2026-09-14 — Batch A moved Mon 08:00 → Mon 12:00 Manila (cron edit, one job)
+
+Batch A's ~56 min solo run at 08:00 was stalling the OpenClaw cron scheduler for its whole duration
+(Aug 31, Sep 7, Sep 14 — identical to the minute): everything due 08:05–08:47 on every agent fired
+together at ~08:56 and the whole Palantir fleet hit the shared Sheets per-minute quota (report
+`~/reports/Ads-Pullers-Sep13-Gap-2026-09-14.md`). The old "finish before Palantir's 10:00 scrape"
+reason is stale — `competitor-tracker-weekly` runs Mon 06:00 now. New slot 12:00: Batch B (11:30,
+~8.5 min) is done by ~11:39 so the shared `.run.lock` is free; nothing else is due until Batch C at
+13:30 (which still waits up to 1800 s for the lock). Discord report order on Mondays is now B, A,
+C, D. Edited with `openclaw cron edit 34357ef3-… --cron "0 12 * * 1" --tz Asia/Manila`; verified by
+diffing `openclaw cron list --json` before/after — one job, one field. The job's stored
+`description` still says "Mon 08:00" (not edited, to keep the diff literal).
+

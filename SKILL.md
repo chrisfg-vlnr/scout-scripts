@@ -54,7 +54,9 @@ documented IP-wide Shopify `local_rate_limited` throttle risk (see primer, 2026-
 Each batch is the same `index.js`/`lib.js`/`.run.lock` machinery, selected by a per-competitor
 `"batch"` field in `config.json` via `--group`:
 
-- **Batch A** — job `34357ef3-…`, **Mon 08:00 Manila**, `--group A --wait-for-lock 300`, timeout
+- **Batch A** — job `34357ef3-…`, **Mon 12:00 Manila** (moved from 08:00 on 2026-09-14 — at 08:00 its ~56 min
+  run stalled the OpenClaw scheduler and every 08:05–08:47 job fired at once at ~08:56; the 12:00–12:56
+  window has nothing else due), `--group A --wait-for-lock 300`, timeout
   **10800s (3h)**. CristalliSchwiiz **only** — the ~14–19k-product monster (`maxRankPages:2000`,
   historically ~57–78 min alone). Solo by design: even alone it's the single largest batch: giving
   it a 3h ceiling (instead of the other batches' 7200s) keeps it under ~50% of its own timeout
