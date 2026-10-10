@@ -162,3 +162,54 @@ expose `timeoutSeconds`, and diagnostics need the real per-job detail):
 - **Cheap to revise:** if Batch C's margin (the tightest of the four at design time) looks thin
   in the real run, rebalancing one store to Batch D is a one-line `config.json` edit — no cron
   changes needed unless the schedule itself needs to move.
+
+---
+
+## 2026-10-10 — all four batches moved to early Monday (00:05–~04:25 Manila)
+
+**Why:** a long `--command` job holds the OpenClaw scheduler tick for every agent while it runs
+(found 2026-09-14, seen again 2026-10-05). The Mon 11:30–17:00 Scout window delayed fleet jobs into
+same-second bursts (shared Sheets service-account 429s) and dropped image-translate queue slots,
+on the day Chris builds most. Overnight, the only other job due is the 15-min image queue (stalling
+it at night is accepted). Zero code changes; only `schedule.expr` + `description` per job.
+
+| Batch | job | before | after | expected end | max-measured end | ceiling end |
+|---|---|---|---|---|---|---|
+| B | 95657ebe-99b6-4266-80f2-f94f1ec14c04 | `30 11 * * 1` | `5 0 * * 1` (00:05) | ~00:09 (1 store) | 00:14 (8.8 min, 4 stores) | 02:05 |
+| A | 34357ef3-6885-4d40-a406-b3b16a46a92e | `0 12 * * 1` | `30 0 * * 1` (00:30) | ~01:27 | 01:28 (57.1 min) | 03:30 |
+| C | faee47e1-a0fe-4d53-8d0f-57aa27528276 | `30 13 * * 1` | `50 1 * * 1` (01:50) | ~02:31 | 02:33 (42.7 min) | 03:50 |
+| D | 05acdb9e-dae7-43b6-8fcf-7d0e87e41488 | `30 15 * * 1` | `0 3 * * 1` (03:00) | ~04:10 | 04:23 (82.9 min, 12 stores) | 05:00 |
+
+All `tz: Asia/Manila`. Max-measured = last 9 Mondays from `openclaw cron runs`. Gaps after each
+predecessor's max-measured end: B→A 16 min, A→C 22, C→D 27, D→Palantir 06:00 97 min (60 min even
+at D's timeout). On a measured week no batch is ever due while another runs. Overrun behaviour:
+the scheduler-tick stall makes a due batch fire late (after the running one exits), and
+`.run.lock` makes a batch that does start early sleep-poll every 15 s up to `--wait-for-lock`
+(1800 s; **300 s for A**) and then exit 3 (cron `error` + failureAlert DM) — never a concurrent
+second scrape. Only A hitting its 3 h ceiling (3× anything recorded) pushes the chain far right.
+Run date is unaffected: `localDate()` formats `new Date()` in Asia/Manila (`index.js:110-112`,
+`:265-266`), so 00:05 Manila is a Monday snapshot even though the host (CEST) says Sunday.
+
+Before/after cron JSON: `~/scout-archive/cron-pre-earlymonday-20261010/` (`cron-all-before.json`,
+`cron-all-after.json`, `cron-scout-*.json`, `fleet-diff.txt`).
+
+**Rollback (paste as-is; restores the schedule, the descriptions stay new):**
+```
+openclaw cron edit 95657ebe-99b6-4266-80f2-f94f1ec14c04 --cron "30 11 * * 1" --tz Asia/Manila
+openclaw cron edit 34357ef3-6885-4d40-a406-b3b16a46a92e --cron "0 12 * * 1" --tz Asia/Manila
+openclaw cron edit faee47e1-a0fe-4d53-8d0f-57aa27528276 --cron "30 13 * * 1" --tz Asia/Manila
+openclaw cron edit 05acdb9e-dae7-43b6-8fcf-7d0e87e41488 --cron "30 15 * * 1" --tz Asia/Manila
+```
+
+**Monday-morning checklist (first run Mon 2026-10-12; check after ~06:00 Manila):**
+1. `openclaw cron runs --id <id> --limit 1` for each of the 4 → `status: ok`, `runAtMs` at
+   00:05 / 00:30 / 01:50 / 03:00 Manila (±a few min), durations ≈ B ≤10, A ~57, C ~41, D ≤83 min,
+   and the summary says `run date 2026-10-12 (Asia/Manila)`. Read the diagnostics too: `ok`
+   alone doesn't mean every store came back clean.
+2. Discord channel: 4 reports (Batch B, A, C, D) covering 14 stores (1+1+3+9).
+3. Palantir `competitor-tracker-weekly` started at 06:00 on time (`openclaw cron runs --id
+   <its id> --limit 1`) and its Belro/storefront coverage looks normal (Scout's crawl now ends
+   ~1.5 h before it instead of starting 5 h after it).
+4. `osvelten-image-translate-queue` resumed on its :07/:22/:37/:52 rhythm by ~04:37 at the
+   latest (it is stalled while each batch runs; that is expected at night).
+5. No failureAlert DM from the Palantir Telegram account overnight.

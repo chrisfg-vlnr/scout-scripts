@@ -54,39 +54,38 @@ documented IP-wide Shopify `local_rate_limited` throttle risk (see primer, 2026-
 Each batch is the same `index.js`/`lib.js`/`.run.lock` machinery, selected by a per-competitor
 `"batch"` field in `config.json` via `--group`:
 
-- **Batch A** — job `34357ef3-…`, **Mon 12:00 Manila** (moved from 08:00 on 2026-09-14 — at 08:00 its ~56 min
-  run stalled the OpenClaw scheduler and every 08:05–08:47 job fired at once at ~08:56; the 12:00–12:56
-  window has nothing else due), `--group A --wait-for-lock 300`, timeout
-  **10800s (3h)**. CristalliSchwiiz **only** — the ~14–19k-product monster (`maxRankPages:2000`,
-  historically ~57–78 min alone). Solo by design: even alone it's the single largest batch: giving
+Run order on Mondays is **B, A, C, D**, all in the early-morning window **00:05–~04:25 Manila**
+(moved there on 2026-10-10 from the old 11:30–17:00 daytime window: a long `--command` job holds the
+OpenClaw scheduler tick for every agent while it runs, so daytime batches delayed the fleet's jobs
+into Sheets-quota bursts and dropped image-queue slots — see the primer's 2026-10-10 entry). In
+Michael's time that is Sunday evening (~18:05–22:30 CEST; an hour earlier in CET). Run date is
+still Monday — `localDate()` uses Asia/Manila, not the host clock.
+
+- **Batch B** — job `95657ebe-…`, **Mon 00:05 Manila**, `--group B --wait-for-lock 1800`, timeout
+  7200s. ByEmiliaRose (as of 2026-10-10; was 4 stores, ~8.5 min, until Oct 7). A few minutes.
+- **Batch A** — job `34357ef3-…`, **Mon 00:30 Manila**, `--group A --wait-for-lock 300`, timeout
+  **10800s (3h)**. CristalliSchwiiz **only** — the ~20k-product monster (`maxRankPages:2000`,
+  ~54–57 min alone since Aug 10). Solo by design: even alone it's the single largest batch: giving
   it a 3h ceiling (instead of the other batches' 7200s) keeps it under ~50% of its own timeout
   under a realistic worst-case, which it could not do inside 7200s (see the 2026-08-07 primer
-  entry). Scheduled first and early specifically so it finishes (~09:15–09:30 typical) well
-  before Palantir's 10:00 storefront scrape starts.
-- **Batch B** — job `95657ebe-…`, **Mon 11:30 Manila** (3.5h after A), `--group B
-  --wait-for-lock 1800`, timeout 7200s. ByEmiliaRose, Gartenort, DriftAndTide, NouveauRiche.
-  Starts a full hour after Palantir's `competitor-tracker-weekly` (Mon 10:00, ~35 min) is
-  expected to finish — that job scrapes DriftAndTide too, so this gap is intentional, not
-  incidental.
-- **Batch C** — job `faee47e1-…`, **Mon 13:30 Manila** (2h after B), `--group C
-  --wait-for-lock 1800`, timeout 7200s. Feanatic, BelroShop, HausOfMode. BelroShop is the store
-  that got rate-limit-walled on 2026-07-20 and is also scraped by Palantir (as "Belro") at 10:00 —
-  this batch's 3.5h clearance from that scrape is deliberate extra margin, not just stagger
-  spacing.
-- **Batch D** — job `05acdb9e-…`, **Mon 15:30 Manila** (2h after C), `--group D
-  --include-ungrouped --wait-for-lock 1800`, timeout 7200s. The **catch-all** batch (any
-  enabled competitor with no `batch` runs here) and the destination `competitors.js --add`
-  assigns new competitors to (`config.json`'s `defaultBatch: "D"`) — it currently carries the
-  most headroom of the four, by design, to absorb the 15→20 cap's 5 new slots without needing
-  another restructure. As of 2026-08-07: BreuerMode, RisoraShop, RedlichBecker, JesseLondon,
-  LaLunaMelbourne, Drune, LozendaFashion.
+  entry). (Was Mon 08:00 until 2026-09-14, then Mon 12:00 until 2026-10-10.)
+- **Batch C** — job `faee47e1-…`, **Mon 01:50 Manila**, `--group C --wait-for-lock 1800`, timeout
+  7200s. Feanatic, BelroShop, HausOfMode (~39–43 min). BelroShop is the store that got
+  rate-limit-walled on 2026-07-20 and is also scraped by Palantir (as "Belro") in
+  `competitor-tracker-weekly` at Mon **06:00** — this batch ends ~02:35, ~3.5h clear of it.
+- **Batch D** — job `05acdb9e-…`, **Mon 03:00 Manila**, `--group D --include-ungrouped
+  --wait-for-lock 1800`, timeout 7200s (so even a hung run is killed by 05:00, before Palantir's
+  06:00 start). The **catch-all** batch (any enabled competitor with no `batch` runs here) and the
+  destination `competitors.js --add` assigns new competitors to (`config.json`'s
+  `defaultBatch: "D"`). As of 2026-10-10: LozendaFashion, RisoraShop, HarperWears, LeonBoutique,
+  ShopWecro, KarlsonBerlin, NordheimMode, FalkenhofMode, SarandoShop (max ~83 min at 12 stores).
 
 Roster drifts as competitors are added/removed/rebalanced; `config.json`'s `batch` field is
 always the source of truth — the lists above are a convenience summary, not authoritative.
 
 Design notes:
 - **Each batch self-delivers its own Discord report** (header shows "Batch A/B/C/D") — the team
-  sees up to four messages Monday, spread from ~08:00 to ~16:00. Simpler than coordinating one
+  sees up to four messages per week, spread from ~00:10 to ~04:25 Manila on Monday (Sunday evening in Europe). Simpler than coordinating one
   combined report across four jobs, and the spread-out timing is intentional (throttle recovery
   time between batches), not a bug to compress.
 - **`--include-ungrouped`** is now only on Batch D (the catch-all) — any enabled competitor with

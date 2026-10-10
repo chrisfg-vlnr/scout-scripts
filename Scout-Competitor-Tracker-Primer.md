@@ -1505,3 +1505,51 @@ USER_ENTERED from the JSON's `formulas` array, then freeze row 1.
 backup. Q&A (`query.js`) reads snapshots only, so deleting tabs changed nothing Scout answers. SKILL.md
 and AGENTS.md were not changed.
 Full writeup: `~/reports/Scout-TabCleanup-2026-10-09.md`.
+
+### 2026-10-10 — all four weekly batches moved to early Monday, 00:05–~04:25 Manila (cron edits, zero code)
+
+**What moved** (one `openclaw cron edit <id> --cron … --tz Asia/Manila --description …` per job,
+each verified by re-reading `cron list --agent scout --all --json` and diffing every field):
+B `30 11 * * 1` → `5 0 * * 1`; A `0 12 * * 1` → `30 0 * * 1`; C `30 13 * * 1` → `50 1 * * 1`;
+D `30 15 * * 1` → `0 3 * * 1`. Job ids, argv, timeouts, tz, rosters, `config.json` and all code
+untouched. Fleet-wide before/after diff (`~/scout-archive/cron-pre-earlymonday-20261010/`): exactly
+these four jobs differ, only in `schedule.expr`, `description`, `updatedAtMs`, `nextRunAtMs`. The
+stale descriptions (one still said "Mon 08:00") were rewritten to the new time + roster. Run order
+stays B, A, C, D. Layout table, rollback lines and the Monday checklist:
+`Batch-Restructure-Runbook.md` (2026-10-10 section).
+
+**Why:** a long `--command` job holds the OpenClaw scheduler tick for every agent until it exits
+(2026-09-14 entry; seen again 2026-10-05, when C fired 2 min and D 8 min late). Daytime Scout
+batches pushed fleet jobs into same-second bursts on the shared Sheets service account and dropped
+15-min image-queue slots, on Mondays when Chris builds most. A fleet scan of all 45 jobs found
+nothing due on any agent between Sun 22:00 and Mon 05:59 Manila except the 15-min
+`osvelten-image-translate-queue`; Palantir starts at 06:00 (`competitor-tracker-weekly`,
+`conversion-prio-daily`), then 06:05/06:20/06:25.
+
+**Durations used** (`openclaw cron runs`, last 9 Mondays, all `ok`): B 8.3–8.8 min at 4 stores
+(1 store now); A 53.9–57.1 (creeping up with the ~20k catalog); C 38.9–42.7; D 28.5–82.9 (82.9 on
+10-05 with 12 stores; 9 now). Max-measured chain ends 04:23; D's 7200 s timeout kills it by 05:00
+at worst.
+
+**Lock finding** (`index.js:79-99`): a batch that finds `.run.lock` held by a live pid sleep-polls
+every 15 s up to `--wait-for-lock` (B/C/D 1800 s, A 300 s), then exits 3 → cron `error` →
+failureAlert. It never runs a second concurrent scrape. Combined with the tick stall (a batch due
+during another fires only after it exits), an overrun shifts the chain right; it doesn't double-run.
+Whether OpenClaw re-runs a recurring command job 30 s after a non-zero exit is not settled by the
+docs (they describe a newer release) — UNVERIFIED, but it can't cause an overlap either way.
+
+**Date finding:** `localDate(tz)` = `new Intl.DateTimeFormat('sv', { timeZone: tz }).format(new
+Date())` with `tz = cfg.reportTz || 'Asia/Manila'` (`index.js:110-112`, `:265-266`; config has no
+`reportTz`). So a 00:05 Manila run is dated Monday even though the host (CEST) still says Sunday
+18:05. Nothing keys on ISO week or weekday; "previous snapshot" is filename order. No mis-dating.
+
+**Side effects:** Michael's reports now land Sunday evening in Europe (~18:05–22:30 CEST; an hour
+earlier after the Oct 25 switch to CET) instead of Monday afternoon. BelroShop (C, ~01:50–02:33)
+stays ~3.5 h clear of Palantir's 06:00 Belro scrape. `SKILL.md`'s schedule block was updated.
+**Not changed, pending Chris:** the workspace `AGENTS.md` (§ weekly batches, lines ~230–246) still
+says 11:30/12:00/13:30/15:30 and "~8 AM to ~4 PM". The 09-14 move did update it (workspace
+`a933971`). `/new` was held because it only matters once AGENTS.md changes, and it would wipe
+the live Discord context (the open Sheet1 question).
+
+**First run on the new slots:** Mon 2026-10-12 (00:05 Manila = Sun 2026-10-11 18:05 CEST).
+Report: `~/reports/Scout-BatchReschedule-EarlyMonday-2026-10-10.md`.
