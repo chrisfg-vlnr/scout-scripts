@@ -1477,3 +1477,31 @@ C, D. Edited with `openclaw cron edit 34357ef3-… --cron "0 12 * * 1" --tz Asia
 diffing `openclaw cron list --json` before/after — one job, one field. The job's stored
 `description` still says "Mon 08:00" (not edited, to keep the diff literal).
 
+
+### 2026-10-10 — 10 untracked competitor tabs deleted from the Sheet (Michael's 2026-10-07 request)
+
+On 2026-10-07 09:01Z Michael asked on Discord to stop tracking six stores and to delete the tabs of
+every untracked competitor. Scout's transcript shows it ran only `competitors.js --list` and then six
+chained `competitors.js --disable "<Name>"` (all `✔ … is now disabled`, exit 0). That is the
+sanctioned path, with no hand-edits. config.json mtime 09:01:20Z matches, and the file is still
+uncommitted (left as found).
+Roster observed 2026-10-10: **14/20 enabled**. Disabled: NouveauRiche, Drune, Gartenort,
+DriftAndTide, LaLunaMelbourne, TessaBayside. Absent (removed earlier): JenniferJohnCharleston,
+BreuerMode, RedlichBecker, JesseLondon. Batches: A = CristalliSchwiiz · **B = ByEmiliaRose only**
+(three of its four stores are now disabled; no batch is empty, nothing rebalanced) · C = Feanatic,
+BelroShop, HausOfMode · D = 9 stores. Cron untouched.
+**Sheet:** 25 → 15 tabs (the 14 enabled competitors + Sheet1, which was kept and not asked about).
+The 10 tabs above were deleted in one `deleteSheet` batchUpdate. sheetIds were resolved live and
+cross-checked against the export, and the survivors' sheetIds and grids were verified unchanged
+afterwards. The formula scan found 0 formulas on any kept tab, so there is no #REF! risk.
+**Backup:** `~/scout-archive/sheet-tabs-pre-delete-20261009/` (mode 700) holds `<Tab>.json`
+(`formulas` = lossless raw cells, `values` = formatted) and `<Tab>.csv` per tab, plus
+`sheet-metadata-before.json` / `-after.json`. Each tab was deep-equal-verified against a fresh live
+read before the delete. To restore one tab: addSheet with the exact title, `values.update` A1
+USER_ENTERED from the JSON's `formulas` array, then freeze row 1.
+**Re-enable after deletion is safe:** `writeCompetitorTab` → `getOrCreateSheetTabId` (lib.js)
+`addSheet`s a missing tab, so `--enable`/`--add` just starts a fresh tab built from local snapshots
+(`weeksToKeep`). The Sheet-only preserved history (older Removed rows) is not rebuilt; it lives in the
+backup. Q&A (`query.js`) reads snapshots only, so deleting tabs changed nothing Scout answers. SKILL.md
+and AGENTS.md were not changed.
+Full writeup: `~/reports/Scout-TabCleanup-2026-10-09.md`.
