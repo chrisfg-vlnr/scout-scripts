@@ -1553,3 +1553,34 @@ the live Discord context (the open Sheet1 question).
 
 **First run on the new slots:** Mon 2026-10-12 (00:05 Manila = Sun 2026-10-11 18:05 CEST).
 Report: `~/reports/Scout-BatchReschedule-EarlyMonday-2026-10-10.md`.
+
+### 2026-10-13 — Oct 12 adds put Batch D at its ceiling; D timeout 7200 → 9000 (cron edit only)
+
+**First early-Monday run (Mon 2026-10-12), checked:** all four batches `ok` on the exact
+second: B 00:05 (2.2 min), A 00:30 (57.1), C 01:50 (42.8), D 03:00 (76.1, ended 04:16). Every
+summary says `run date 2026-10-12` and "Discord report sent." No 429s, no
+blocked/partial/capped/phantom/collapse, no failureAlert. Palantir's tracker started 06:00:00 on
+time (29.2 min).
+
+**The adds:** Michaël added 6 stores from Discord on 10-12: Clarendale (3,916 products),
+SageSydney (1,259), Solvena (946), Voranos (710), CocoSydney (1,864) at ~03:51–05:04 Manila,
+VelareehHaus (1,211) at 15:40 (via Chris's Discord prompt). All baselines are clean Tier 1+2,
+99.9–100% coverage, no flags. All got `batch:"D"` from `defaultBatch`. **Enabled count is now
+20/20, so the cap is full.** Scout's hint escalated 99 → 103 → 106 → 108 → 114 → 117 min "vs a
+60 min budget".
+
+**Finding:** the "60 min budget" is code, not a stale doc line: `competitors.js:115` =
+½ × hardcoded `BATCH_TIMEOUT_SECONDS` (D 7200). Its 350 products/min constant is ~15% slow
+(measured D 408/min). Real D projection is ~100 min, and a 1.25× week would cross the 7200 s
+ceiling (05:00). A kill keeps the finished stores' snapshots and Sheet tabs but loses the whole D
+Discord report (`index.js:424-427` sends after the loop).
+
+**Also found:** Clarendale's and SageSydney's `--add` crawled while D held `.run.lock`
+(`competitors.js` has no lock check). It was harmless this time. Not changed.
+
+**Applied (Chris's go, option 1 of 3):** `openclaw cron edit 05acdb9e-… --timeout-seconds 9000`.
+Only that field changed fleet-wide; next run Mon 10-19 03:00. Rollback, model, rejected options
+and the Oct 19 checklist are in `Batch-Restructure-Runbook.md` (2026-10-13 section). SKILL.md's
+capacity-hint section was re-based; workspace AGENTS.md got D's 15-store roster, its 2.5 h
+timeout, and the rule that the hint line is an FYI for Chris, never a channel action. Code
+constants not changed (Chris's call). Report: `~/reports/Scout-BatchD-Rebalance-2026-10-13.md`.

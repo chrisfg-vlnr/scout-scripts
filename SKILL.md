@@ -327,20 +327,30 @@ untrusted channel shouldn't be able to trigger unbounded fetches against arbitra
 the VPS. Numbers are conservative defaults, not tuned; adjust in `config.json` if they're wrong
 in practice.
 
-### Capacity hint on `--add` (2026-08-07)
+### Capacity hint on `--add` (2026-08-07; re-based 2026-10-13)
 
 After a successful baseline capture, `--add` silently checks whether the new competitor's target
-batch (its `batch` field) is now projected to exceed **50% of that batch's cron `timeoutSeconds`**
-— the same margin this repo's own 2026-08-07 batch restructure used to size Batches A–D. Below
-threshold: no output at all. Above threshold: one extra line appended to the normal confirmation
-(e.g. `⚠️ Batch D now projected at ~83 min vs a 60 min budget...`) — this line is visible in the
-external Discord `--add` confirmation, by design, since it fires rarely. Throughput constant
-(`CAPACITY_HINT_PRODUCTS_PER_MINUTE = 350`, in `competitors.js`) and the per-batch timeout map are
-documented in-code with full derivation; **must be re-derived once Monday 2026-08-10 gives real
-batch-level `lastDurationMs` numbers.** The whole check is wrapped in try/catch — any failure
-(missing snapshot, corrupt file, unknown batch) is swallowed and `--add` completes exactly as
-before. This is a nudge, not a gate — it never blocks, delays, or fails an add, and it does not
-touch the cap/cooldown/batch-assignment logic above.
+batch (its `batch` field) is now projected to exceed **50% of the timeout hardcoded in
+`competitors.js` (`BATCH_TIMEOUT_SECONDS`)**. Below threshold: no output at all. Above threshold:
+one extra line appended to the normal confirmation (e.g. `⚠️ Batch D now projected at ~117 min vs
+a 60 min budget...`), visible in the external Discord `--add` confirmation by design. The estimate
+is the batch's summed catalog count ÷ `CAPACITY_HINT_PRODUCTS_PER_MINUTE = 350`, which runs ~15%
+high: Batch D measured ~408 products/min on 2026-10-12 (76.1 min for 31,031 products).
+
+**The "budget" is an early-warning line, not the limit.** The real limits (2026-10-13):
+- each batch must finish inside its own cron timeout — B 120 min, A 180 min, C 120 min,
+  **D 150 min** (raised from 120 on 2026-10-13; `BATCH_TIMEOUT_SECONDS.D` in `competitors.js`
+  still says 7200, so the hint still prints "60 min budget" for D — known, code change not made);
+- the whole Monday chain (00:05 Manila onward) must end by **05:30 Manila**: Palantir's tracker
+  fires at 06:00 and a running batch holds the scheduler tick for every agent;
+- expected Batch D runtime with its 15 stores of 2026-10-13: ~100 min (03:00 → ~04:40).
+
+When the line appears: tell the channel the add worked and nothing is needed from them, mention the
+line once as "FYI for Chris", and never move a competitor between batches yourself — rebalancing is
+Chris's call. The whole check is wrapped in try/catch — any failure (missing snapshot, corrupt
+file, unknown batch) is swallowed and `--add` completes exactly as before. It never blocks,
+delays, or fails an add, and it does not touch the cap/cooldown/batch-assignment logic above.
+Runtime model and per-batch projections: `Batch-Restructure-Runbook.md` (2026-10-13 section).
 
 ## Discord report
 

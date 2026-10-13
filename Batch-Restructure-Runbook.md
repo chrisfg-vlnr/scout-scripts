@@ -213,3 +213,79 @@ openclaw cron edit 05acdb9e-dae7-43b6-8fcf-7d0e87e41488 --cron "30 15 * * 1" --t
 4. `osvelten-image-translate-queue` resumed on its :07/:22/:37/:52 rhythm by ~04:37 at the
    latest (it is stalled while each batch runs; that is expected at night).
 5. No failureAlert DM from the Palantir Telegram account overnight.
+
+## 2026-10-13 — Batch D timeout 7200 → 9000 after the Oct 12 adds (cron edit, zero code, zero roster change)
+
+**Why.** Michaël added 6 stores from Discord on Mon 2026-10-12 (Clarendale, SageSydney, Solvena,
+Voranos, CocoSydney ~03:51–05:04 Manila; VelareehHaus 15:40). All landed in D via
+`defaultBatch: "D"`. Roster is now **20/20 enabled (cap full)**. D on Oct 19 = 15 stores.
+
+**Runtime model** (measured Mon 2026-10-12, first early-Monday run, all 4 batches `ok`).
+Cost per HTTP request (rank pages + catalog pages at 250/page):
+
+| Batch | requests | seconds | s/req | products/min |
+|---|---|---|---|---|
+| A | 1,803 | 3,424 | 1.90 | 361 |
+| B | 37 | 134 | 3.61 | 596 |
+| C | 968 | 2,571 | 2.66 | 541 |
+| D | 1,650 | 4,564 | 2.77 | 408 |
+
+New stores add 389 requests → ~18 min (page model) / ~24 min (product model). **D expected
+~100 min** (40,937 products ÷ 408/min). Scout's `--add` hint said 117 (350/min constant).
+Slow-week multiplier 1.25× (largest week-to-week swing on a stable roster: C 9%).
+
+**Roster per batch (unchanged by this edit):**
+- B (00:05): ByEmiliaRose
+- A (00:30): CristalliSchwiiz
+- C (01:50): Feanatic, BelroShop, HausOfMode
+- D (03:00): LozendaFashion, RisoraShop, HarperWears, LeonBoutique, ShopWecro, KarlsonBerlin,
+  NordheimMode, FalkenhofMode, SarandoShop, Clarendale, SageSydney, Solvena, Voranos,
+  CocoSydney, VelareehHaus
+
+**Oct 19 projection after the edit (Manila):**
+
+| Batch | start | expected end | 1.25× end | ceiling end |
+|---|---|---|---|---|
+| B | 00:05 | 00:07 | 00:08 | 02:05 |
+| A | 00:30 | 01:27 | 01:41 | 03:30 |
+| C | 01:50 | 02:33 | 02:44 | 03:50 |
+| D | 03:00 | ~04:40 | ~05:05 | **05:30** (was 05:00) |
+
+Before the edit, D's 1.25× end (05:05) was past its 05:00 ceiling. Now D is killed only at 1.5×,
+and even a kill ends the chain at 05:30, 30 min before Palantir's 06:00.
+**What a D kill costs** (`index.js:300`, `:410`, `:424-427`): finished stores keep their snapshot
+and Sheet tab; the in-flight and later stores (the 6 new ones run last) lose the week; the
+**whole D Discord report is lost** (it is sent only after the loop); failureAlert DMs Chris.
+
+**Rejected:** D→C (C's 1.25× end 02:44 leaves no room before 03:00); D→B (5 small stores fit
+B by ~00:25, but exposes the Batch A trap: A's `--wait-for-lock 300` gives up at 00:35 →
+Cristalli's week lost).
+
+**Edit (one job, one field):**
+```
+openclaw cron edit 05acdb9e-dae7-43b6-8fcf-7d0e87e41488 --timeout-seconds 9000
+```
+Verified: fleet before/after (45 jobs) differ only in this job's `payload.timeoutSeconds`
+(7200 → 9000) + `updatedAtMs`; argv, schedule (`0 3 * * 1` Asia/Manila), `noOutputTimeoutSeconds`
+1200 identical; `nextRunAtMs` 1792350000000 = Mon 2026-10-19 03:00 Manila.
+Before/after JSON + untouched config.json copy: `~/scout-archive/config-pre-rebalance-20261012/`.
+
+**Rollback (paste as-is):**
+```
+openclaw cron edit 05acdb9e-dae7-43b6-8fcf-7d0e87e41488 --timeout-seconds 7200
+```
+
+**Not changed (code, Chris's call):** `competitors.js` `BATCH_TIMEOUT_SECONDS.D` still 7200 and
+`CAPACITY_HINT_PRODUCTS_PER_MINUTE` still 350, so `--add` keeps printing "vs a 60 min budget"
+for D. AGENTS.md now tells Scout to relay that line as an FYI for Chris only.
+
+**Oct 19 checklist (check after ~06:00 Manila):**
+1. `openclaw cron runs --id <id> --limit 1` for the 4 → `ok`, runAt 00:05 / 00:30 / 01:50 /
+   03:00, durations ≈ B ~2, A ~57, C ~43, **D 94–100 (alarm > 125)**, summary `run date
+   2026-10-19`. Read diagnostics for blocked/partial/capped/phantom/collapse.
+2. D's summary lists **15** competitors and ends "Discord report sent."; the 6 new stores show
+   their first `new | removed | …` WoW line.
+3. Discord: 4 reports covering 20 stores (1+1+3+15).
+4. Palantir `competitor-tracker-weekly` (67553e4c…) ran at 06:00 on time.
+5. No failureAlert DM overnight.
+6. If D > 110 min: re-run this projection before anyone adds/swaps a store into D.
